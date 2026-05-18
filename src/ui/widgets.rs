@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 
-use crate::app::{App, ConfirmState, ResourceKind, ResourceListState, Screen, TextViewContent};
+use crate::app::{App, ConfirmState, ResourceListState, Screen, TextViewContent};
 use crate::docker::StatusLevel;
 
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -93,7 +93,10 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
         state
             .rows
             .iter()
-            .map(|row| ListItem::new(row.clone()))
+            .map(|row| {
+                let marker = if row.selected { "[x]" } else { "[ ]" };
+                ListItem::new(format!("{marker} {}", row.line))
+            })
             .collect::<Vec<_>>()
     };
 
@@ -132,6 +135,29 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
         ]),
         Line::raw(""),
         Line::from(vec![
+            Span::styled("Search: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(if state.search_query.is_empty() {
+                "(empty)".to_string()
+            } else {
+                state.search_query.clone()
+            }),
+        ]),
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(state.filter.label()),
+            Span::raw("   "),
+            Span::styled("Sort: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(state.sort.label()),
+        ]),
+        Line::from(vec![
+            Span::styled("Counts: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "{} visible / {} total / {} selected",
+                state.visible_count, state.total_count, state.selected_count
+            )),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
             Span::styled("Selected row: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(app.selected_row_preview()),
         ]),
@@ -143,21 +169,7 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
         Line::raw(""),
         Line::from(vec![
             Span::styled("Actions: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(match app.screen {
-                Screen::ResourceList(ResourceKind::Containers) => {
-                    "s start, t stop, R restart, d delete, g logs, i inspect, e shell"
-                }
-                Screen::ResourceList(ResourceKind::Images) => {
-                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
-                }
-                Screen::ResourceList(ResourceKind::Volumes) => {
-                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
-                }
-                Screen::ResourceList(ResourceKind::Networks) => {
-                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
-                }
-                _ => "Enter inspect, Esc back, r refresh",
-            }),
+            Span::raw(state.action_hint),
         ]),
     ])
     .block(Block::default().borders(Borders::ALL).title("Details"))
@@ -196,7 +208,7 @@ pub fn render_text_view(frame: &mut Frame, area: Rect, view: &TextViewContent) {
 pub fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let left = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(20), Constraint::Percentage(35)])
         .split(area);
 
     let status = Paragraph::new(app.status_message.clone())
@@ -204,13 +216,25 @@ pub fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         .wrap(Wrap { trim: true });
     let progress = Paragraph::new(app.progress_text())
         .block(Block::default().borders(Borders::ALL).title("Progress"));
+    let summary = Paragraph::new(app.recent_actions_summary())
+        .block(Block::default().borders(Borders::ALL).title("Recent Actions"))
+        .wrap(Wrap { trim: true });
 
     frame.render_widget(status, left[0]);
     frame.render_widget(progress, left[1]);
+    frame.render_widget(summary, left[2]);
 }
 
 pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
-    let help = Paragraph::new(app.help_text())
+    let help = Paragraph::new(format!(
+        "{}{}",
+        app.help_text(),
+        if app.search_mode {
+            "  |  Search mode: type, Backspace edit, Enter apply, Esc cancel"
+        } else {
+            ""
+        }
+    ))
         .block(Block::default().borders(Borders::ALL).title("Help"))
         .style(Style::default().fg(Color::Gray));
 

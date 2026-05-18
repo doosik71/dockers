@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crossterm::event::KeyCode;
 
 use crate::config::AppConfig;
@@ -20,6 +22,12 @@ pub struct App {
     pub error_message: Option<String>,
     pub is_loading: bool,
     pub tick_count: usize,
+    pub search_mode: bool,
+    pub search_query: String,
+    pub filter: ResourceFilter,
+    pub sort: SortMode,
+    pub selected_keys: BTreeSet<String>,
+    pub recent_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +37,7 @@ pub enum Screen {
     TextView(TextViewState),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ResourceKind {
     Containers,
     Images,
@@ -70,7 +78,47 @@ pub struct ResourceListState {
     pub detail: String,
     pub preview: String,
     pub status: StatusLevel,
-    pub rows: Vec<String>,
+    pub rows: Vec<ResourceRow>,
+    pub total_count: usize,
+    pub visible_count: usize,
+    pub selected_count: usize,
+    pub search_query: String,
+    pub filter: ResourceFilter,
+    pub sort: SortMode,
+    pub action_hint: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceRow {
+    pub key: String,
+    pub line: String,
+    pub preview: String,
+    pub searchable: String,
+    pub status_bucket: ItemStatus,
+    pub sort_name: String,
+    pub sort_rank: usize,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemStatus {
+    Active,
+    Inactive,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceFilter {
+    All,
+    Active,
+    Inactive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    NameAsc,
+    NameDesc,
+    Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,10 +164,17 @@ impl App {
             list_index: 0,
             confirm: None,
             status_message:
-                "Ready. Use arrow keys to navigate, Enter to open, r to refresh.".to_string(),
+                "Ready. Use arrow keys to navigate, / search, f filter, o sort, Space select."
+                    .to_string(),
             error_message: None,
             is_loading: false,
             tick_count: 0,
+            search_mode: false,
+            search_query: String::new(),
+            filter: ResourceFilter::All,
+            sort: SortMode::NameAsc,
+            selected_keys: BTreeSet::new(),
+            recent_actions: vec!["Opened dockers.".to_string()],
         }
     }
 
@@ -134,6 +189,11 @@ impl App {
     pub fn handle_key(&mut self, key: KeyCode) -> Option<AppCommand> {
         if self.confirm.is_some() {
             return self.handle_confirm_key(key);
+        }
+
+        if self.search_mode {
+            self.handle_search_key(key);
+            return None;
         }
 
         match key {
@@ -165,8 +225,30 @@ impl App {
                 self.refresh();
                 None
             }
+            KeyCode::Char('/') => {
+                self.search_mode = true;
+                self.status_message = "Search mode: type to filter rows, Enter to apply, Esc to cancel."
+                    .to_string();
+                None
+            }
+            KeyCode::Char('f') => {
+                self.cycle_filter();
+                None
+            }
+            KeyCode::Char('o') => {
+                self.cycle_sort();
+                None
+            }
+            KeyCode::Char(' ') => {
+                self.toggle_selected_row();
+                None
+            }
+            KeyCode::Char('a') => {
+                self.toggle_select_all_visible();
+                None
+            }
             KeyCode::Char('?') => {
-                self.status_message = "Keys: arrows/hjkl move, Enter open, r refresh, Esc back, q quit. Container actions: s start, t stop, R restart, d delete, g logs, i inspect, e shell.".to_string();
+                self.status_message = "Keys: / search, f filter, o sort, Space select, a select all, r refresh. Containers add s/t/R/d/g/i/e actions.".to_string();
                 None
             }
             _ => self.handle_context_key(key),
@@ -176,6 +258,9 @@ impl App {
     pub fn handle_shell_result(&mut self, result: Result<(), String>, container_name: &str) {
         match result {
             Ok(()) => {
+                self.push_recent_action(format!(
+                    "Returned from shell for container `{container_name}`."
+                ));
                 self.status_message =
                     format!("Returned from interactive shell for container `{container_name}`.");
                 self.error_message = None;
@@ -224,68 +309,74 @@ impl App {
     }
 
     pub fn resource_list_state(&self, kind: ResourceKind) -> ResourceListState {
-        match kind {
+        let (title, detail, preview, status, base_rows, action_hint) = match kind {
             ResourceKind::Containers => {
                 let query = &self.docker.resources.containers;
-                ResourceListState {
-                    title: "Containers".to_string(),
-                    detail: query.status.detail.clone(),
-                    preview: query.preview(),
-                    status: query.status.level,
-                    rows: query
-                        .items
-                        .iter()
-                        .map(|item| format!("{} | {} | {}", item.names, item.state, item.image))
-                        .collect(),
-                }
+                (
+                    "Containers".to_string(),
+                    query.status.detail.clone(),
+                    query.preview(),
+                    query.status.level,
+                    self.build_container_rows(query),
+                    "s start, t stop, R restart, d delete, g logs, i inspect, e shell",
+                )
             }
             ResourceKind::Images => {
                 let query = &self.docker.resources.images;
-                ResourceListState {
-                    title: "Images".to_string(),
-                    detail: query.status.detail.clone(),
-                    preview: query.preview(),
-                    status: query.status.level,
-                    rows: query
-                        .items
-                        .iter()
-                        .map(|item| {
-                            format!(
-                                "{}:{} | {} | {}",
-                                item.repository, item.tag, item.id, item.size
-                            )
-                        })
-                        .collect(),
-                }
+                (
+                    "Images".to_string(),
+                    query.status.detail.clone(),
+                    query.preview(),
+                    query.status.level,
+                    self.build_image_rows(query),
+                    "i inspect, d delete",
+                )
             }
             ResourceKind::Volumes => {
                 let query = &self.docker.resources.volumes;
-                ResourceListState {
-                    title: "Volumes".to_string(),
-                    detail: query.status.detail.clone(),
-                    preview: query.preview(),
-                    status: query.status.level,
-                    rows: query
-                        .items
-                        .iter()
-                        .map(|item| format!("{} | {} | {}", item.name, item.driver, item.scope))
-                        .collect(),
-                }
+                (
+                    "Volumes".to_string(),
+                    query.status.detail.clone(),
+                    query.preview(),
+                    query.status.level,
+                    self.build_volume_rows(query),
+                    "i inspect, d delete",
+                )
             }
             ResourceKind::Networks => {
                 let query = &self.docker.resources.networks;
-                ResourceListState {
-                    title: "Networks".to_string(),
-                    detail: query.status.detail.clone(),
-                    preview: query.preview(),
-                    status: query.status.level,
-                    rows: query
-                        .items
-                        .iter()
-                        .map(|item| format!("{} | {} | {}", item.name, item.driver, item.scope))
-                        .collect(),
-                }
+                (
+                    "Networks".to_string(),
+                    query.status.detail.clone(),
+                    query.preview(),
+                    query.status.level,
+                    self.build_network_rows(query),
+                    "i inspect, d delete",
+                )
             }
+        };
+
+        let total_count = base_rows.len();
+        let mut rows = self.apply_filter_and_sort(base_rows);
+        for row in &mut rows {
+            row.selected = self.selected_keys.contains(&row.key);
+        }
+        let visible_count = rows.len();
+        let selected_count = rows.iter().filter(|row| row.selected).count();
+
+        ResourceListState {
+            title,
+            detail,
+            preview,
+            status,
+            rows,
+            total_count,
+            visible_count,
+            selected_count,
+            search_query: self.search_query.clone(),
+            filter: self.filter,
+            sort: self.sort,
+            action_hint,
         }
     }
 
@@ -411,10 +502,7 @@ impl App {
                 subtitle: "Not supported for this resource".to_string(),
                 body: "Logs are currently available only for containers.".to_string(),
             },
-            (ResourceKind::Containers, TextViewKind::ShellHelp)
-            | (ResourceKind::Images, TextViewKind::ShellHelp)
-            | (ResourceKind::Volumes, TextViewKind::ShellHelp)
-            | (ResourceKind::Networks, TextViewKind::ShellHelp) => {
+            (_, TextViewKind::ShellHelp) => {
                 let container_name = self
                     .selected_container()
                     .map(|container| container.names.clone())
@@ -433,9 +521,11 @@ impl App {
         match self.screen {
             Screen::MainMenu => self.menu_items()[self.menu_index].detail.to_string(),
             Screen::ResourceList(kind) => {
-                let rows = self.resource_list_state(kind).rows;
-                rows.get(self.list_index)
-                    .cloned()
+                let state = self.resource_list_state(kind);
+                state
+                    .rows
+                    .get(self.list_index)
+                    .map(|row| row.preview.clone())
                     .unwrap_or_else(|| "No rows available".to_string())
             }
             Screen::TextView(state) => self.text_view_content(state).subtitle,
@@ -479,18 +569,12 @@ impl App {
 
     pub fn help_text(&self) -> &'static str {
         match self.screen {
-            Screen::MainMenu => "Up/Down move  Enter open  r refresh  q quit  ? help",
+            Screen::MainMenu => "Up/Down move  Enter open  q quit  ? help",
             Screen::ResourceList(ResourceKind::Containers) => {
-                "Up/Down move  Enter inspect  s start  t stop  R restart  d delete  g logs  i inspect  e shell  Esc back"
+                "/ search  f filter  o sort  Space select  a select all  s/t/R/d/g/i/e actions"
             }
-            Screen::ResourceList(ResourceKind::Images) => {
-                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
-            }
-            Screen::ResourceList(ResourceKind::Volumes) => {
-                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
-            }
-            Screen::ResourceList(ResourceKind::Networks) => {
-                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
+            Screen::ResourceList(_) => {
+                "/ search  f filter  o sort  Space select  a select all  i inspect  d delete"
             }
             Screen::TextView(_) => "Esc back  q quit  r refresh",
         }
@@ -502,8 +586,24 @@ impl App {
 
         if self.is_loading {
             format!("{glyph} loading docker data...")
+        } else if self.search_mode {
+            format!("{glyph} search: {}", self.search_query)
         } else {
             format!("{glyph} idle")
+        }
+    }
+
+    pub fn recent_actions_summary(&self) -> String {
+        if self.recent_actions.is_empty() {
+            "No recent actions yet.".to_string()
+        } else {
+            self.recent_actions
+                .iter()
+                .rev()
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         }
     }
 
@@ -605,6 +705,33 @@ impl App {
         None
     }
 
+    fn handle_search_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Esc => {
+                self.search_mode = false;
+                self.status_message = "Search mode cancelled.".to_string();
+            }
+            KeyCode::Enter => {
+                self.search_mode = false;
+                self.list_index = 0;
+                self.status_message = if self.search_query.is_empty() {
+                    "Search cleared.".to_string()
+                } else {
+                    format!("Search applied: `{}`.", self.search_query)
+                };
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                self.list_index = 0;
+            }
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+                self.list_index = 0;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_escape(&mut self) {
         match self.screen {
             Screen::MainMenu => self.open_quit_confirm(),
@@ -652,8 +779,7 @@ impl App {
                 self.screen = Screen::ResourceList(self.selected_menu_item());
                 self.list_index = 0;
                 self.error_message = None;
-                self.status_message =
-                    "Opened resource list. Use Up/Down to move and Esc to return.".to_string();
+                self.status_message = "Opened resource list. Use / search, f filter, o sort, Space select.".to_string();
             }
             Screen::ResourceList(ResourceKind::Containers) => {
                 self.open_text_view(TextViewKind::Inspect);
@@ -670,11 +796,12 @@ impl App {
             Screen::ResourceList(_) => {
                 self.screen = Screen::MainMenu;
                 self.list_index = 0;
+                self.search_mode = false;
                 self.status_message = "Returned to main menu.".to_string();
             }
             Screen::TextView(state) => {
                 self.screen = Screen::ResourceList(state.source);
-                self.status_message = "Returned to container list.".to_string();
+                self.status_message = format!("Returned to {} list.", state.source.label());
             }
             Screen::MainMenu => {}
         }
@@ -695,8 +822,10 @@ impl App {
                     .to_string(),
             );
             self.status_message = "Refresh completed with warnings.".to_string();
+            self.push_recent_action("Refresh completed with warnings.".to_string());
         } else {
             self.status_message = "Refresh completed successfully.".to_string();
+            self.push_recent_action("Refresh completed successfully.".to_string());
         }
 
         self.clamp_selection();
@@ -802,6 +931,7 @@ impl App {
             TextViewKind::Logs => "Opened container logs.".to_string(),
             TextViewKind::ShellHelp => "Opened shell guidance.".to_string(),
         };
+        self.push_recent_action(self.status_message.clone());
         self.error_message = None;
     }
 
@@ -875,6 +1005,7 @@ impl App {
             "Opening interactive shell for `{}`. Exit the shell to return to dockers.",
             container_name
         );
+        self.push_recent_action(self.status_message.clone());
         self.error_message = None;
 
         Some(AppCommand::OpenContainerShell {
@@ -889,9 +1020,10 @@ impl App {
                 self.quit();
                 None
             }
-            ConfirmAction::StopContainer => {
-                self.run_selected_container_action(|service, id| service.stop_container(id), "Container stopped.")
-            }
+            ConfirmAction::StopContainer => self.run_selected_container_action(
+                |service, id| service.stop_container(id),
+                "Container stopped.",
+            ),
             ConfirmAction::RestartContainer => self.run_selected_container_action(
                 |service, id| service.restart_container(id),
                 "Container restarted.",
@@ -900,13 +1032,18 @@ impl App {
                 |service, id| service.remove_container(id),
                 "Container removed.",
             ),
-            ConfirmAction::RemoveImage => {
-                self.run_selected_image_action(|service, id| service.remove_image(id), "Image removed.")
-            }
-            ConfirmAction::RemoveVolume => self
-                .run_selected_volume_action(|service, name| service.remove_volume(name), "Volume removed."),
-            ConfirmAction::RemoveNetwork => self
-                .run_selected_network_action(|service, id| service.remove_network(id), "Network removed."),
+            ConfirmAction::RemoveImage => self.run_selected_image_action(
+                |service, id| service.remove_image(id),
+                "Image removed.",
+            ),
+            ConfirmAction::RemoveVolume => self.run_selected_volume_action(
+                |service, name| service.remove_volume(name),
+                "Volume removed.",
+            ),
+            ConfirmAction::RemoveNetwork => self.run_selected_network_action(
+                |service, id| service.remove_network(id),
+                "Network removed.",
+            ),
         }
     }
 
@@ -915,6 +1052,50 @@ impl App {
             |service, id| service.start_container(id),
             "Container started.",
         );
+    }
+
+    fn selected_container(&self) -> Option<&ContainerSummary> {
+        self.selected_container_key().and_then(|key| {
+            self.docker
+                .resources
+                .containers
+                .items
+                .iter()
+                .find(|item| item.id == key)
+        })
+    }
+
+    fn selected_image(&self) -> Option<&ImageSummary> {
+        self.selected_row_key(ResourceKind::Images).and_then(|key| {
+            self.docker
+                .resources
+                .images
+                .items
+                .iter()
+                .find(|item| item.id == key)
+        })
+    }
+
+    fn selected_volume(&self) -> Option<&VolumeSummary> {
+        self.selected_row_key(ResourceKind::Volumes).and_then(|key| {
+            self.docker
+                .resources
+                .volumes
+                .items
+                .iter()
+                .find(|item| item.name == key)
+        })
+    }
+
+    fn selected_network(&self) -> Option<&NetworkSummary> {
+        self.selected_row_key(ResourceKind::Networks).and_then(|key| {
+            self.docker
+                .resources
+                .networks
+                .items
+                .iter()
+                .find(|item| item.id == key)
+        })
     }
 
     fn run_selected_container_action<F>(
@@ -937,6 +1118,7 @@ impl App {
         match action(&service, &container_id) {
             Ok(output) => {
                 self.status_message = format!("{success_prefix} {}", output.trim());
+                self.push_recent_action(self.status_message.clone());
                 self.error_message = None;
                 self.screen = Screen::ResourceList(ResourceKind::Containers);
                 self.refresh();
@@ -950,23 +1132,11 @@ impl App {
         None
     }
 
-    fn selected_container(&self) -> Option<&ContainerSummary> {
-        self.docker.resources.containers.items.get(self.list_index)
-    }
-
-    fn selected_image(&self) -> Option<&ImageSummary> {
-        self.docker.resources.images.items.get(self.list_index)
-    }
-
-    fn selected_volume(&self) -> Option<&VolumeSummary> {
-        self.docker.resources.volumes.items.get(self.list_index)
-    }
-
-    fn selected_network(&self) -> Option<&NetworkSummary> {
-        self.docker.resources.networks.items.get(self.list_index)
-    }
-
-    fn run_selected_image_action<F>(&mut self, action: F, success_prefix: &str) -> Option<AppCommand>
+    fn run_selected_image_action<F>(
+        &mut self,
+        action: F,
+        success_prefix: &str,
+    ) -> Option<AppCommand>
     where
         F: Fn(&DockerService, &str) -> Result<String, String>,
     {
@@ -982,6 +1152,7 @@ impl App {
         match action(&service, &image_id) {
             Ok(output) => {
                 self.status_message = format!("{success_prefix} {}", output.trim());
+                self.push_recent_action(self.status_message.clone());
                 self.error_message = None;
                 self.screen = Screen::ResourceList(ResourceKind::Images);
                 self.refresh();
@@ -995,7 +1166,11 @@ impl App {
         None
     }
 
-    fn run_selected_volume_action<F>(&mut self, action: F, success_prefix: &str) -> Option<AppCommand>
+    fn run_selected_volume_action<F>(
+        &mut self,
+        action: F,
+        success_prefix: &str,
+    ) -> Option<AppCommand>
     where
         F: Fn(&DockerService, &str) -> Result<String, String>,
     {
@@ -1008,6 +1183,7 @@ impl App {
         match action(&service, &volume_name) {
             Ok(output) => {
                 self.status_message = format!("{success_prefix} {}", output.trim());
+                self.push_recent_action(self.status_message.clone());
                 self.error_message = None;
                 self.screen = Screen::ResourceList(ResourceKind::Volumes);
                 self.refresh();
@@ -1041,6 +1217,7 @@ impl App {
         match action(&service, &network_id) {
             Ok(output) => {
                 self.status_message = format!("{success_prefix} {}", output.trim());
+                self.push_recent_action(self.status_message.clone());
                 self.error_message = None;
                 self.screen = Screen::ResourceList(ResourceKind::Networks);
                 self.refresh();
@@ -1053,6 +1230,211 @@ impl App {
 
         None
     }
+
+    fn build_container_rows(&self, query: &ResourceQuery<ContainerSummary>) -> Vec<ResourceRow> {
+        query.items
+            .iter()
+            .map(|item| ResourceRow {
+                key: item.id.clone(),
+                line: format!("{} | {} | {}", item.names, item.state, item.image),
+                preview: item.preview(),
+                searchable: format!(
+                    "{} {} {} {} {} {}",
+                    item.id, item.names, item.image, item.state, item.status, item.ports
+                )
+                .to_lowercase(),
+                status_bucket: if item.state.eq_ignore_ascii_case("running") {
+                    ItemStatus::Active
+                } else {
+                    ItemStatus::Inactive
+                },
+                sort_name: item.names.to_lowercase(),
+                sort_rank: if item.state.eq_ignore_ascii_case("running") {
+                    0
+                } else {
+                    1
+                },
+                selected: false,
+            })
+            .collect()
+    }
+
+    fn build_image_rows(&self, query: &ResourceQuery<ImageSummary>) -> Vec<ResourceRow> {
+        query.items
+            .iter()
+            .map(|item| ResourceRow {
+                key: item.id.clone(),
+                line: format!(
+                    "{}:{} | {} | {}",
+                    item.repository, item.tag, item.id, item.size
+                ),
+                preview: item.preview(),
+                searchable: format!(
+                    "{} {} {} {} {}",
+                    item.id, item.repository, item.tag, item.size, item.created_since
+                )
+                .to_lowercase(),
+                status_bucket: ItemStatus::Other,
+                sort_name: format!("{}:{}", item.repository, item.tag).to_lowercase(),
+                sort_rank: 1,
+                selected: false,
+            })
+            .collect()
+    }
+
+    fn build_volume_rows(&self, query: &ResourceQuery<VolumeSummary>) -> Vec<ResourceRow> {
+        query.items
+            .iter()
+            .map(|item| ResourceRow {
+                key: item.name.clone(),
+                line: format!("{} | {} | {}", item.name, item.driver, item.scope),
+                preview: item.preview(),
+                searchable: format!(
+                    "{} {} {} {}",
+                    item.name, item.driver, item.scope, item.mountpoint
+                )
+                .to_lowercase(),
+                status_bucket: ItemStatus::Other,
+                sort_name: item.name.to_lowercase(),
+                sort_rank: 1,
+                selected: false,
+            })
+            .collect()
+    }
+
+    fn build_network_rows(&self, query: &ResourceQuery<NetworkSummary>) -> Vec<ResourceRow> {
+        query.items
+            .iter()
+            .map(|item| ResourceRow {
+                key: item.id.clone(),
+                line: format!("{} | {} | {}", item.name, item.driver, item.scope),
+                preview: item.preview(),
+                searchable: format!("{} {} {} {}", item.id, item.name, item.driver, item.scope)
+                    .to_lowercase(),
+                status_bucket: ItemStatus::Other,
+                sort_name: item.name.to_lowercase(),
+                sort_rank: 1,
+                selected: false,
+            })
+            .collect()
+    }
+
+    fn apply_filter_and_sort(&self, mut rows: Vec<ResourceRow>) -> Vec<ResourceRow> {
+        if !self.search_query.trim().is_empty() {
+            let needle = self.search_query.to_lowercase();
+            rows.retain(|row| row.searchable.contains(&needle));
+        }
+
+        match self.filter {
+            ResourceFilter::All => {}
+            ResourceFilter::Active => rows.retain(|row| row.status_bucket == ItemStatus::Active),
+            ResourceFilter::Inactive => {
+                rows.retain(|row| row.status_bucket == ItemStatus::Inactive)
+            }
+        }
+
+        match self.sort {
+            SortMode::NameAsc => rows.sort_by(|a, b| a.sort_name.cmp(&b.sort_name)),
+            SortMode::NameDesc => rows.sort_by(|a, b| b.sort_name.cmp(&a.sort_name)),
+            SortMode::Status => rows.sort_by(|a, b| {
+                a.sort_rank
+                    .cmp(&b.sort_rank)
+                    .then_with(|| a.sort_name.cmp(&b.sort_name))
+            }),
+        }
+
+        rows
+    }
+
+    fn selected_row_key(&self, kind: ResourceKind) -> Option<String> {
+        self.resource_list_state(kind)
+            .rows
+            .get(self.list_index)
+            .map(|row| row.key.clone())
+    }
+
+    fn selected_container_key(&self) -> Option<String> {
+        self.selected_row_key(ResourceKind::Containers)
+    }
+
+    fn cycle_filter(&mut self) {
+        self.filter = match self.filter {
+            ResourceFilter::All => ResourceFilter::Active,
+            ResourceFilter::Active => ResourceFilter::Inactive,
+            ResourceFilter::Inactive => ResourceFilter::All,
+        };
+        self.list_index = 0;
+        self.status_message = format!("Filter set to {}.", self.filter.label());
+    }
+
+    fn cycle_sort(&mut self) {
+        self.sort = match self.sort {
+            SortMode::NameAsc => SortMode::NameDesc,
+            SortMode::NameDesc => SortMode::Status,
+            SortMode::Status => SortMode::NameAsc,
+        };
+        self.list_index = 0;
+        self.status_message = format!("Sort set to {}.", self.sort.label());
+    }
+
+    fn toggle_selected_row(&mut self) {
+        let Screen::ResourceList(kind) = self.screen else {
+            return;
+        };
+
+        let Some(key) = self.selected_row_key(kind) else {
+            self.status_message = "No visible row to select.".to_string();
+            return;
+        };
+
+        if self.selected_keys.contains(&key) {
+            self.selected_keys.remove(&key);
+            self.status_message = "Row removed from selection.".to_string();
+        } else {
+            self.selected_keys.insert(key);
+            self.status_message = "Row added to selection.".to_string();
+        }
+    }
+
+    fn toggle_select_all_visible(&mut self) {
+        let Screen::ResourceList(kind) = self.screen else {
+            return;
+        };
+
+        let state = self.resource_list_state(kind);
+        if state.rows.is_empty() {
+            self.status_message = "No visible rows to select.".to_string();
+            return;
+        }
+
+        let all_selected = state
+            .rows
+            .iter()
+            .all(|row| self.selected_keys.contains(&row.key));
+
+        if all_selected {
+            for row in &state.rows {
+                self.selected_keys.remove(&row.key);
+            }
+            self.status_message = format!("Cleared {} visible selections.", state.rows.len());
+        } else {
+            for row in &state.rows {
+                self.selected_keys.insert(row.key.clone());
+            }
+            self.status_message = format!("Selected all {} visible rows.", state.rows.len());
+        }
+    }
+
+    fn push_recent_action(&mut self, action: String) {
+        if action.trim().is_empty() {
+            return;
+        }
+        self.recent_actions.push(action);
+        if self.recent_actions.len() > 12 {
+            let drain = self.recent_actions.len() - 12;
+            self.recent_actions.drain(0..drain);
+        }
+    }
 }
 
 impl ResourceKind {
@@ -1062,6 +1444,26 @@ impl ResourceKind {
             ResourceKind::Images => "image",
             ResourceKind::Volumes => "volume",
             ResourceKind::Networks => "network",
+        }
+    }
+}
+
+impl ResourceFilter {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ResourceFilter::All => "all",
+            ResourceFilter::Active => "active",
+            ResourceFilter::Inactive => "inactive",
+        }
+    }
+}
+
+impl SortMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortMode::NameAsc => "name asc",
+            SortMode::NameDesc => "name desc",
+            SortMode::Status => "status",
         }
     }
 }
