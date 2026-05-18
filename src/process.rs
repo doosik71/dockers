@@ -59,7 +59,7 @@ impl ProcessRunner {
         Self
     }
 
-    pub fn run(&self, request: &CommandRequest) -> Result<CommandOutput> {
+    pub fn run_captured(&self, request: &CommandRequest) -> Result<CommandOutput> {
         tracing::debug!(
             program = %request.program,
             args = ?request.args,
@@ -82,15 +82,26 @@ impl ProcessRunner {
             .output()
             .map_err(|source| AppError::process_spawn(request.program.clone(), source))?;
 
-        if !output.status.success() {
-            return Err(AppError::process_failed(request.program.clone(), output));
-        }
-
         Ok(CommandOutput {
             status_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         })
+    }
+
+    pub fn run(&self, request: &CommandRequest) -> Result<CommandOutput> {
+        let output = self.run_captured(request)?;
+
+        if output.status_code != Some(0) {
+            return Err(AppError::process_failed_from_parts(
+                request.program.clone(),
+                output.status_code,
+                output.stdout,
+                output.stderr,
+            ));
+        }
+
+        Ok(output)
     }
 }
 
@@ -120,5 +131,17 @@ impl DockerCommandRunner {
 
         let request = CommandRequest::new(self.docker_program.clone()).with_args(full_args);
         self.runner.run(&request)
+    }
+
+    pub fn run_captured<I, S>(&self, args: I) -> Result<CommandOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut full_args = self.default_args.clone();
+        full_args.extend(args.into_iter().map(Into::into));
+
+        let request = CommandRequest::new(self.docker_program.clone()).with_args(full_args);
+        self.runner.run_captured(&request)
     }
 }

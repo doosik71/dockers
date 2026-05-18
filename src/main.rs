@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod docker;
 mod error;
 mod logging;
 mod process;

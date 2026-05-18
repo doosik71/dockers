@@ -1,9 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
+use crate::docker::StatusLevel;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
@@ -15,22 +16,60 @@ pub fn render(frame: &mut Frame, app: &App) {
         ])
         .split(frame.area());
 
-    let header = Paragraph::new(app.title)
-        .block(Block::default().borders(Borders::ALL).title("dockers"))
-        .style(Style::default().add_modifier(Modifier::BOLD));
-
     let body = Paragraph::new(format!(
-        "Docker를 텍스트 콘솔에서 쉽게 다루기 위한 TUI 골격입니다.\n\n설정 초안:\n- docker command: {}\n- log level: {}\n- file logging: {}\n\n다음 단계:\n- Docker 연결 확인\n- 리소스 목록 화면 추가\n- 작업 메뉴 연결",
+        "dockers TUI scaffold\n\nConfig:\n- docker command: {}\n- log level: {}\n- file logging: {}\n\nEnvironment checks:\n- {}: {}\n- {}: {}\n- {}: {}\n- {}: {}\n\nNext:\n- add resource list screens\n- wire command actions\n- support refresh",
         app.config.docker.command,
         app.config.logging.level,
-        if app.config.logging.write_to_file { "on" } else { "off" }
+        if app.config.logging.write_to_file {
+            "on"
+        } else {
+            "off"
+        },
+        app.docker.installation.label,
+        app.docker.installation.detail,
+        app.docker.daemon.label,
+        app.docker.daemon.detail,
+        app.docker.version.label,
+        app.docker.version.detail,
+        app.docker.output_strategy.label,
+        app.docker.output_strategy.detail,
     ))
     .block(Block::default().borders(Borders::ALL).title("Home"));
 
     let footer = Paragraph::new("Press q or Esc to quit")
         .block(Block::default().borders(Borders::ALL).title("Help"));
 
+    let header_style = match overall_status(app) {
+        StatusLevel::Ok | StatusLevel::Info => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        StatusLevel::Warning => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        StatusLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    };
+
+    let header = Paragraph::new(app.title)
+        .block(Block::default().borders(Borders::ALL).title("dockers"))
+        .style(header_style);
+
     frame.render_widget(header, areas[0]);
     frame.render_widget(body, areas[1]);
     frame.render_widget(footer, areas[2]);
+}
+
+fn overall_status(app: &App) -> StatusLevel {
+    let levels = [
+        app.docker.installation.level,
+        app.docker.daemon.level,
+        app.docker.version.level,
+    ];
+
+    if levels.contains(&StatusLevel::Error) {
+        StatusLevel::Error
+    } else if levels.contains(&StatusLevel::Warning) {
+        StatusLevel::Warning
+    } else {
+        StatusLevel::Ok
+    }
 }

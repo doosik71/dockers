@@ -21,6 +21,7 @@ impl Default for AppConfig {
 pub struct DockerConfig {
     pub command: String,
     pub default_args: Vec<String>,
+    pub output_format: DockerOutputFormat,
 }
 
 impl Default for DockerConfig {
@@ -28,8 +29,15 @@ impl Default for DockerConfig {
         Self {
             command: "docker".to_string(),
             default_args: Vec::new(),
+            output_format: DockerOutputFormat::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DockerOutputFormat {
+    #[default]
+    Json,
 }
 
 #[derive(Debug, Clone)]

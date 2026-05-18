@@ -1,5 +1,4 @@
 use std::io;
-use std::process::{ExitStatus, Output};
 
 use thiserror::Error;
 
@@ -26,6 +25,8 @@ pub enum AppError {
         stdout: String,
         stderr: String,
     },
+    #[error("failed to parse JSON output: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 impl AppError {
@@ -40,16 +41,17 @@ impl AppError {
         }
     }
 
-    pub fn process_failed(program: impl Into<String>, output: Output) -> Self {
+    pub fn process_failed_from_parts(
+        program: impl Into<String>,
+        code: Option<i32>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+    ) -> Self {
         Self::ProcessFailed {
             program: program.into(),
-            code: exit_code(output.status),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
         }
     }
-}
-
-fn exit_code(status: ExitStatus) -> Option<i32> {
-    status.code()
 }
