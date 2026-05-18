@@ -174,6 +174,39 @@ impl DockerService {
         }
     }
 
+    pub fn remove_image(&self, image_id: &str) -> Result<String, String> {
+        self.run_simple_action(["image", "rm", image_id], "image removed")
+    }
+
+    pub fn inspect_image(&self, image_id: &str) -> Result<String, String> {
+        self.runner
+            .run(["image", "inspect", image_id])
+            .map(|output| output.stdout)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn remove_volume(&self, volume_name: &str) -> Result<String, String> {
+        self.run_simple_action(["volume", "rm", volume_name], "volume removed")
+    }
+
+    pub fn inspect_volume(&self, volume_name: &str) -> Result<String, String> {
+        self.runner
+            .run(["volume", "inspect", volume_name])
+            .map(|output| output.stdout)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn remove_network(&self, network_id: &str) -> Result<String, String> {
+        self.run_simple_action(["network", "rm", network_id], "network removed")
+    }
+
+    pub fn inspect_network(&self, network_id: &str) -> Result<String, String> {
+        self.runner
+            .run(["network", "inspect", network_id])
+            .map(|output| output.stdout)
+            .map_err(|error| error.to_string())
+    }
+
     fn inspect_environment(&self) -> DockerEnvironmentStatus {
         let installation_output = self.runner.run_captured(["--version"]);
 
@@ -404,6 +437,14 @@ impl DockerService {
     }
 
     fn run_container_action<I, S>(&self, args: I, success_fallback: &str) -> Result<String, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.run_simple_action(args, success_fallback)
+    }
+
+    fn run_simple_action<I, S>(&self, args: I, success_fallback: &str) -> Result<String, String>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,

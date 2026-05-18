@@ -1,7 +1,10 @@
 use crossterm::event::KeyCode;
 
 use crate::config::AppConfig;
-use crate::docker::{ContainerSummary, DockerOverview, DockerService, ResourceQuery, StatusLevel};
+use crate::docker::{
+    ContainerSummary, DockerOverview, DockerService, ImageSummary, NetworkSummary, ResourceQuery,
+    StatusLevel, VolumeSummary,
+};
 
 #[derive(Debug)]
 pub struct App {
@@ -56,6 +59,9 @@ pub enum ConfirmAction {
     StopContainer,
     RestartContainer,
     RemoveContainer,
+    RemoveImage,
+    RemoveVolume,
+    RemoveNetwork,
 }
 
 #[derive(Debug, Clone)]
@@ -284,8 +290,8 @@ impl App {
     }
 
     pub fn text_view_content(&self, state: TextViewState) -> TextViewContent {
-        match state.kind {
-            TextViewKind::Inspect => {
+        match (state.source, state.kind) {
+            (ResourceKind::Containers, TextViewKind::Inspect) => {
                 if let Some(container) = self.selected_container() {
                     let service = DockerService::new(&self.config.docker);
                     match service.inspect_container(&container.id) {
@@ -308,7 +314,76 @@ impl App {
                     }
                 }
             }
-            TextViewKind::Logs => {
+            (ResourceKind::Images, TextViewKind::Inspect) => {
+                if let Some(image) = self.selected_image() {
+                    let service = DockerService::new(&self.config.docker);
+                    match service.inspect_image(&image.id) {
+                        Ok(output) => TextViewContent {
+                            title: format!("Inspect: {}:{}", image.repository, image.tag),
+                            subtitle: "Raw `docker image inspect` output".to_string(),
+                            body: output,
+                        },
+                        Err(error) => TextViewContent {
+                            title: format!("Inspect: {}:{}", image.repository, image.tag),
+                            subtitle: "Failed to load details".to_string(),
+                            body: error,
+                        },
+                    }
+                } else {
+                    TextViewContent {
+                        title: "Inspect".to_string(),
+                        subtitle: "No image selected".to_string(),
+                        body: "Select an image first.".to_string(),
+                    }
+                }
+            }
+            (ResourceKind::Volumes, TextViewKind::Inspect) => {
+                if let Some(volume) = self.selected_volume() {
+                    let service = DockerService::new(&self.config.docker);
+                    match service.inspect_volume(&volume.name) {
+                        Ok(output) => TextViewContent {
+                            title: format!("Inspect: {}", volume.name),
+                            subtitle: "Raw `docker volume inspect` output".to_string(),
+                            body: output,
+                        },
+                        Err(error) => TextViewContent {
+                            title: format!("Inspect: {}", volume.name),
+                            subtitle: "Failed to load details".to_string(),
+                            body: error,
+                        },
+                    }
+                } else {
+                    TextViewContent {
+                        title: "Inspect".to_string(),
+                        subtitle: "No volume selected".to_string(),
+                        body: "Select a volume first.".to_string(),
+                    }
+                }
+            }
+            (ResourceKind::Networks, TextViewKind::Inspect) => {
+                if let Some(network) = self.selected_network() {
+                    let service = DockerService::new(&self.config.docker);
+                    match service.inspect_network(&network.id) {
+                        Ok(output) => TextViewContent {
+                            title: format!("Inspect: {}", network.name),
+                            subtitle: "Raw `docker network inspect` output".to_string(),
+                            body: output,
+                        },
+                        Err(error) => TextViewContent {
+                            title: format!("Inspect: {}", network.name),
+                            subtitle: "Failed to load details".to_string(),
+                            body: error,
+                        },
+                    }
+                } else {
+                    TextViewContent {
+                        title: "Inspect".to_string(),
+                        subtitle: "No network selected".to_string(),
+                        body: "Select a network first.".to_string(),
+                    }
+                }
+            }
+            (ResourceKind::Containers, TextViewKind::Logs) => {
                 if let Some(container) = self.selected_container() {
                     let service = DockerService::new(&self.config.docker);
                     match service.container_logs(&container.id) {
@@ -331,7 +406,15 @@ impl App {
                     }
                 }
             }
-            TextViewKind::ShellHelp => {
+            (_, TextViewKind::Logs) => TextViewContent {
+                title: "Logs".to_string(),
+                subtitle: "Not supported for this resource".to_string(),
+                body: "Logs are currently available only for containers.".to_string(),
+            },
+            (ResourceKind::Containers, TextViewKind::ShellHelp)
+            | (ResourceKind::Images, TextViewKind::ShellHelp)
+            | (ResourceKind::Volumes, TextViewKind::ShellHelp)
+            | (ResourceKind::Networks, TextViewKind::ShellHelp) => {
                 let container_name = self
                     .selected_container()
                     .map(|container| container.names.clone())
@@ -400,8 +483,14 @@ impl App {
             Screen::ResourceList(ResourceKind::Containers) => {
                 "Up/Down move  Enter inspect  s start  t stop  R restart  d delete  g logs  i inspect  e shell  Esc back"
             }
-            Screen::ResourceList(_) => {
-                "Up/Down move  Enter inspect row  Esc back  r refresh  q quit"
+            Screen::ResourceList(ResourceKind::Images) => {
+                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
+            }
+            Screen::ResourceList(ResourceKind::Volumes) => {
+                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
+            }
+            Screen::ResourceList(ResourceKind::Networks) => {
+                "Up/Down move  Enter/i inspect  d delete  Esc back  r refresh  q quit"
             }
             Screen::TextView(_) => "Esc back  q quit  r refresh",
         }
@@ -446,6 +535,39 @@ impl App {
                     None
                 }
                 KeyCode::Char('e') => self.open_shell(),
+                _ => None,
+            },
+            Screen::ResourceList(ResourceKind::Images) => match key {
+                KeyCode::Char('d') => {
+                    self.open_resource_confirm(ConfirmAction::RemoveImage);
+                    None
+                }
+                KeyCode::Char('i') | KeyCode::Enter => {
+                    self.open_text_view_for(ResourceKind::Images, TextViewKind::Inspect);
+                    None
+                }
+                _ => None,
+            },
+            Screen::ResourceList(ResourceKind::Volumes) => match key {
+                KeyCode::Char('d') => {
+                    self.open_resource_confirm(ConfirmAction::RemoveVolume);
+                    None
+                }
+                KeyCode::Char('i') | KeyCode::Enter => {
+                    self.open_text_view_for(ResourceKind::Volumes, TextViewKind::Inspect);
+                    None
+                }
+                _ => None,
+            },
+            Screen::ResourceList(ResourceKind::Networks) => match key {
+                KeyCode::Char('d') => {
+                    self.open_resource_confirm(ConfirmAction::RemoveNetwork);
+                    None
+                }
+                KeyCode::Char('i') | KeyCode::Enter => {
+                    self.open_text_view_for(ResourceKind::Networks, TextViewKind::Inspect);
+                    None
+                }
                 _ => None,
             },
             Screen::TextView(_) => None,
@@ -536,10 +658,8 @@ impl App {
             Screen::ResourceList(ResourceKind::Containers) => {
                 self.open_text_view(TextViewKind::Inspect);
             }
-            Screen::ResourceList(_) => {
-                self.status_message =
-                    "Row selection is active. Resource-specific detail screens come next."
-                        .to_string();
+            Screen::ResourceList(kind) => {
+                self.open_text_view_for(kind, TextViewKind::Inspect);
             }
             Screen::TextView(_) => {}
         }
@@ -658,7 +778,7 @@ impl App {
                 ),
                 "Delete".to_string(),
             ),
-            ConfirmAction::Quit => ("Quit dockers?", "Quit?".to_string(), "Quit".to_string()),
+            _ => ("Quit dockers?", "Quit?".to_string(), "Quit".to_string()),
         };
 
         self.confirm = Some(ConfirmState {
@@ -672,16 +792,74 @@ impl App {
     }
 
     fn open_text_view(&mut self, kind: TextViewKind) {
-        self.screen = Screen::TextView(TextViewState {
-            source: ResourceKind::Containers,
-            kind,
-        });
+        self.open_text_view_for(ResourceKind::Containers, kind);
+    }
+
+    fn open_text_view_for(&mut self, source: ResourceKind, kind: TextViewKind) {
+        self.screen = Screen::TextView(TextViewState { source, kind });
         self.status_message = match kind {
-            TextViewKind::Inspect => "Opened container details.".to_string(),
+            TextViewKind::Inspect => format!("Opened {} details.", source.label()),
             TextViewKind::Logs => "Opened container logs.".to_string(),
             TextViewKind::ShellHelp => "Opened shell guidance.".to_string(),
         };
         self.error_message = None;
+    }
+
+    fn open_resource_confirm(&mut self, action: ConfirmAction) {
+        let (title, message, confirm_label) = match action {
+            ConfirmAction::RemoveImage => {
+                let Some(image) = self.selected_image() else {
+                    self.error_message = Some("No image selected.".to_string());
+                    return;
+                };
+                (
+                    "Delete image?",
+                    format!(
+                        "Remove image `{}:{}` ({})? This may fail if containers still reference it.",
+                        image.repository, image.tag, image.id
+                    ),
+                    "Delete".to_string(),
+                )
+            }
+            ConfirmAction::RemoveVolume => {
+                let Some(volume) = self.selected_volume() else {
+                    self.error_message = Some("No volume selected.".to_string());
+                    return;
+                };
+                (
+                    "Delete volume?",
+                    format!(
+                        "Remove volume `{}`? This is destructive if data is still needed.",
+                        volume.name
+                    ),
+                    "Delete".to_string(),
+                )
+            }
+            ConfirmAction::RemoveNetwork => {
+                let Some(network) = self.selected_network() else {
+                    self.error_message = Some("No network selected.".to_string());
+                    return;
+                };
+                (
+                    "Delete network?",
+                    format!(
+                        "Remove network `{}` ({})? Connected containers may be affected.",
+                        network.name, network.id
+                    ),
+                    "Delete".to_string(),
+                )
+            }
+            _ => return,
+        };
+
+        self.confirm = Some(ConfirmState {
+            title: title.to_string(),
+            message,
+            confirm_label,
+            cancel_label: "Cancel".to_string(),
+            selected_confirm: false,
+            action,
+        });
     }
 
     fn open_shell(&mut self) -> Option<AppCommand> {
@@ -722,6 +900,13 @@ impl App {
                 |service, id| service.remove_container(id),
                 "Container removed.",
             ),
+            ConfirmAction::RemoveImage => {
+                self.run_selected_image_action(|service, id| service.remove_image(id), "Image removed.")
+            }
+            ConfirmAction::RemoveVolume => self
+                .run_selected_volume_action(|service, name| service.remove_volume(name), "Volume removed."),
+            ConfirmAction::RemoveNetwork => self
+                .run_selected_network_action(|service, id| service.remove_network(id), "Network removed."),
         }
     }
 
@@ -767,6 +952,117 @@ impl App {
 
     fn selected_container(&self) -> Option<&ContainerSummary> {
         self.docker.resources.containers.items.get(self.list_index)
+    }
+
+    fn selected_image(&self) -> Option<&ImageSummary> {
+        self.docker.resources.images.items.get(self.list_index)
+    }
+
+    fn selected_volume(&self) -> Option<&VolumeSummary> {
+        self.docker.resources.volumes.items.get(self.list_index)
+    }
+
+    fn selected_network(&self) -> Option<&NetworkSummary> {
+        self.docker.resources.networks.items.get(self.list_index)
+    }
+
+    fn run_selected_image_action<F>(&mut self, action: F, success_prefix: &str) -> Option<AppCommand>
+    where
+        F: Fn(&DockerService, &str) -> Result<String, String>,
+    {
+        let Some((image_id, image_name)) = self
+            .selected_image()
+            .map(|image| (image.id.clone(), format!("{}:{}", image.repository, image.tag)))
+        else {
+            self.error_message = Some("No image selected.".to_string());
+            return None;
+        };
+
+        let service = DockerService::new(&self.config.docker);
+        match action(&service, &image_id) {
+            Ok(output) => {
+                self.status_message = format!("{success_prefix} {}", output.trim());
+                self.error_message = None;
+                self.screen = Screen::ResourceList(ResourceKind::Images);
+                self.refresh();
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = format!("Action failed for image `{}`.", image_name);
+            }
+        }
+
+        None
+    }
+
+    fn run_selected_volume_action<F>(&mut self, action: F, success_prefix: &str) -> Option<AppCommand>
+    where
+        F: Fn(&DockerService, &str) -> Result<String, String>,
+    {
+        let Some(volume_name) = self.selected_volume().map(|volume| volume.name.clone()) else {
+            self.error_message = Some("No volume selected.".to_string());
+            return None;
+        };
+
+        let service = DockerService::new(&self.config.docker);
+        match action(&service, &volume_name) {
+            Ok(output) => {
+                self.status_message = format!("{success_prefix} {}", output.trim());
+                self.error_message = None;
+                self.screen = Screen::ResourceList(ResourceKind::Volumes);
+                self.refresh();
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = format!("Action failed for volume `{}`.", volume_name);
+            }
+        }
+
+        None
+    }
+
+    fn run_selected_network_action<F>(
+        &mut self,
+        action: F,
+        success_prefix: &str,
+    ) -> Option<AppCommand>
+    where
+        F: Fn(&DockerService, &str) -> Result<String, String>,
+    {
+        let Some((network_id, network_name)) = self
+            .selected_network()
+            .map(|network| (network.id.clone(), network.name.clone()))
+        else {
+            self.error_message = Some("No network selected.".to_string());
+            return None;
+        };
+
+        let service = DockerService::new(&self.config.docker);
+        match action(&service, &network_id) {
+            Ok(output) => {
+                self.status_message = format!("{success_prefix} {}", output.trim());
+                self.error_message = None;
+                self.screen = Screen::ResourceList(ResourceKind::Networks);
+                self.refresh();
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = format!("Action failed for network `{}`.", network_name);
+            }
+        }
+
+        None
+    }
+}
+
+impl ResourceKind {
+    fn label(&self) -> &'static str {
+        match self {
+            ResourceKind::Containers => "container",
+            ResourceKind::Images => "image",
+            ResourceKind::Volumes => "volume",
+            ResourceKind::Networks => "network",
+        }
     }
 }
 

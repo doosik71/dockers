@@ -147,6 +147,15 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
                 Screen::ResourceList(ResourceKind::Containers) => {
                     "s start, t stop, R restart, d delete, g logs, i inspect, e shell"
                 }
+                Screen::ResourceList(ResourceKind::Images) => {
+                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
+                }
+                Screen::ResourceList(ResourceKind::Volumes) => {
+                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
+                }
+                Screen::ResourceList(ResourceKind::Networks) => {
+                    "i inspect, d delete, Enter inspect, Esc back, r refresh"
+                }
                 _ => "Enter inspect, Esc back, r refresh",
             }),
         ]),
