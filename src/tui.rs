@@ -9,7 +9,8 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::app::App;
+use crate::app::{App, AppCommand};
+use crate::docker::DockerService;
 use crate::error::Result;
 use crate::ui;
 
@@ -55,7 +56,37 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             continue;
         }
 
-        app.handle_key(key.code);
+        if let Some(command) = app.handle_key(key.code) {
+            execute_app_command(terminal, app, command)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_app_command(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    command: AppCommand,
+) -> Result<()> {
+    match command {
+        AppCommand::OpenContainerShell {
+            container_id,
+            container_name,
+        } => {
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+
+            let service = DockerService::new(&app.config.docker);
+            let result = service.open_container_shell(&container_id);
+
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.hide_cursor()?;
+
+            app.handle_shell_result(result, &container_name);
+        }
     }
 
     Ok(())

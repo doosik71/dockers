@@ -124,6 +124,56 @@ impl DockerService {
         }
     }
 
+    pub fn start_container(&self, container_id: &str) -> Result<String, String> {
+        self.run_container_action(["start", container_id], "container started")
+    }
+
+    pub fn stop_container(&self, container_id: &str) -> Result<String, String> {
+        self.run_container_action(["stop", container_id], "container stopped")
+    }
+
+    pub fn restart_container(&self, container_id: &str) -> Result<String, String> {
+        self.run_container_action(["restart", container_id], "container restarted")
+    }
+
+    pub fn remove_container(&self, container_id: &str) -> Result<String, String> {
+        self.run_container_action(["rm", "-f", container_id], "container removed")
+    }
+
+    pub fn inspect_container(&self, container_id: &str) -> Result<String, String> {
+        self.runner
+            .run(["inspect", container_id])
+            .map(|output| output.stdout)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn container_logs(&self, container_id: &str) -> Result<String, String> {
+        self.runner
+            .run(["logs", "--tail", "200", container_id])
+            .map(|output| {
+                if output.stdout.is_empty() {
+                    "No container logs available.".to_string()
+                } else {
+                    output.stdout
+                }
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn open_container_shell(&self, container_id: &str) -> Result<(), String> {
+        match self.runner.run_interactive(["exec", "-it", container_id, "/bin/sh"]) {
+            Ok(()) => Ok(()),
+            Err(sh_error) => self
+                .runner
+                .run_interactive(["exec", "-it", container_id, "/bin/bash"])
+                .map_err(|bash_error| {
+                    format!(
+                        "failed to open shell with /bin/sh ({sh_error}); fallback /bin/bash also failed ({bash_error})"
+                    )
+                }),
+        }
+    }
+
     fn inspect_environment(&self) -> DockerEnvironmentStatus {
         let installation_output = self.runner.run_captured(["--version"]);
 
@@ -351,6 +401,17 @@ impl DockerService {
 
     fn parse_json_string(&self, output: &CommandOutput) -> Result<String, serde_json::Error> {
         serde_json::from_str::<String>(&output.stdout)
+    }
+
+    fn run_container_action<I, S>(&self, args: I, success_fallback: &str) -> Result<String, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.runner
+            .run(args)
+            .map(|output| non_empty_or_fallback(output.stdout, success_fallback))
+            .map_err(|error| error.to_string())
     }
 }
 

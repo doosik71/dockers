@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Stdio;
 
 use crate::error::{AppError, Result};
 
@@ -103,6 +104,44 @@ impl ProcessRunner {
 
         Ok(output)
     }
+
+    pub fn run_interactive(&self, request: &CommandRequest) -> Result<()> {
+        tracing::debug!(
+            program = %request.program,
+            args = ?request.args,
+            current_dir = ?request.current_dir,
+            "running interactive external command"
+        );
+
+        let mut command = Command::new(&request.program);
+        command.args(&request.args);
+        command.stdin(Stdio::inherit());
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+
+        if let Some(current_dir) = &request.current_dir {
+            command.current_dir(current_dir);
+        }
+
+        if !request.env.is_empty() {
+            command.envs(&request.env);
+        }
+
+        let status = command
+            .status()
+            .map_err(|source| AppError::process_spawn(request.program.clone(), source))?;
+
+        if !status.success() {
+            return Err(AppError::process_failed_from_parts(
+                request.program.clone(),
+                status.code(),
+                "",
+                "",
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,5 +182,17 @@ impl DockerCommandRunner {
 
         let request = CommandRequest::new(self.docker_program.clone()).with_args(full_args);
         self.runner.run_captured(&request)
+    }
+
+    pub fn run_interactive<I, S>(&self, args: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut full_args = self.default_args.clone();
+        full_args.extend(args.into_iter().map(Into::into));
+
+        let request = CommandRequest::new(self.docker_program.clone()).with_args(full_args);
+        self.runner.run_interactive(&request)
     }
 }

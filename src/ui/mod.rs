@@ -15,6 +15,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match app.screen {
         Screen::MainMenu => widgets::render_main_menu(frame, areas.content, app),
         Screen::ResourceList(kind) => render_resource_list(frame, areas.content, app, kind),
+        Screen::TextView(state) => widgets::render_text_view(frame, areas.content, &app.text_view_content(state)),
     }
 
     if let Some(error) = &app.error_message {

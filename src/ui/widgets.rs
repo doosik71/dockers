@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 
-use crate::app::{App, ConfirmState, ResourceListState, Screen};
+use crate::app::{App, ConfirmState, ResourceKind, ResourceListState, Screen, TextViewContent};
 use crate::docker::StatusLevel;
 
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -23,6 +23,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     let subtitle = match app.screen {
         Screen::MainMenu => "Main Menu",
         Screen::ResourceList(_) => "Resource List",
+        Screen::TextView(_) => "Text View",
     };
 
     let header = Paragraph::new(Line::from(vec![
@@ -139,6 +140,16 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
             Span::styled("Preview: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(state.preview.clone()),
         ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Actions: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(match app.screen {
+                Screen::ResourceList(ResourceKind::Containers) => {
+                    "s start, t stop, R restart, d delete, g logs, i inspect, e shell"
+                }
+                _ => "Enter inspect, Esc back, r refresh",
+            }),
+        ]),
     ])
     .block(Block::default().borders(Borders::ALL).title("Details"))
     .wrap(Wrap { trim: true });
@@ -153,6 +164,24 @@ pub fn render_error(frame: &mut Frame, area: Rect, error: &str) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(panel, area);
+}
+
+pub fn render_text_view(frame: &mut Frame, area: Rect, view: &TextViewContent) {
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(8)])
+        .split(area);
+
+    let meta = Paragraph::new(view.subtitle.clone())
+        .block(Block::default().borders(Borders::ALL).title(view.title.clone()))
+        .style(Style::default().fg(Color::Cyan));
+
+    let body = Paragraph::new(view.body.clone())
+        .block(Block::default().borders(Borders::ALL).title("Content"))
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(meta, sections[0]);
+    frame.render_widget(body, sections[1]);
 }
 
 pub fn render_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -263,6 +292,7 @@ fn query_label(app: &App) -> &'static str {
             crate::app::ResourceKind::Volumes => app.docker.resources.volumes.label,
             crate::app::ResourceKind::Networks => app.docker.resources.networks.label,
         },
+        Screen::TextView(_) => "Viewer",
     }
 }
 
