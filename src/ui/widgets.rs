@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
 };
 
-use crate::app::{App, ConfirmState, ResourceListState, Screen, TextViewContent};
+use crate::app::{App, ConfirmState, CreateWizardStep, CreateWizardView, ImageInputMode, ResourceListState, Screen, TextViewContent};
 use crate::docker::StatusLevel;
 
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -24,6 +24,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
         Screen::MainMenu => "Main Menu",
         Screen::ResourceList(_) => "Resource List",
         Screen::TextView(_) => "Text View",
+        Screen::CreateWizard => "Create Wizard",
     };
 
     let header = Paragraph::new(Line::from(vec![
@@ -205,6 +206,79 @@ pub fn render_text_view(frame: &mut Frame, area: Rect, view: &TextViewContent) {
     frame.render_widget(body, sections[1]);
 }
 
+pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardView) {
+    let sections = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(area);
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(10)])
+        .split(sections[0]);
+
+    let prompt = Paragraph::new(view.prompt.clone())
+        .block(Block::default().borders(Borders::ALL).title(view.title.clone()))
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(prompt, left[0]);
+
+    match view.step {
+        CreateWizardStep::Image => {
+            let items = if view.image_rows.is_empty() {
+                vec![ListItem::new("No images available. Press Tab for manual image input.")]
+            } else {
+                view.image_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, row)| {
+                        let marker = if index == view.image_index { ">> " } else { "   " };
+                        ListItem::new(format!("{marker}{row}"))
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let title = match view.image_mode {
+                ImageInputMode::Select => "Image Selection",
+                ImageInputMode::Manual => "Manual Image Input",
+            };
+
+            let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+            frame.render_widget(list, left[1]);
+        }
+        _ => {
+            let input = Paragraph::new(view.input_value.clone())
+                .block(Block::default().borders(Borders::ALL).title("Input"))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(input, left[1]);
+        }
+    }
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(8)])
+        .split(sections[1]);
+
+    let guidance = Paragraph::new(format!(
+        "Step: {}\nMode: {}\n{}",
+        view.step.label(),
+        match view.image_mode {
+            ImageInputMode::Select => "select",
+            ImageInputMode::Manual => "manual",
+        },
+        view.guidance
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Guidance"))
+    .wrap(Wrap { trim: true });
+
+    let summary = Paragraph::new(view.summary_lines.join("\n"))
+        .block(Block::default().borders(Borders::ALL).title("Request Summary"))
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(guidance, right[0]);
+    frame.render_widget(summary, right[1]);
+}
+
 pub fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let left = Layout::default()
         .direction(Direction::Horizontal)
@@ -326,6 +400,7 @@ fn query_label(app: &App) -> &'static str {
             crate::app::ResourceKind::Networks => app.docker.resources.networks.label,
         },
         Screen::TextView(_) => "Viewer",
+        Screen::CreateWizard => "Wizard",
     }
 }
 

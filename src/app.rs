@@ -4,8 +4,8 @@ use crossterm::event::KeyCode;
 
 use crate::config::AppConfig;
 use crate::docker::{
-    ContainerSummary, DockerOverview, DockerService, ImageSummary, NetworkSummary, ResourceQuery,
-    StatusLevel, VolumeSummary,
+    ContainerCreateRequest, ContainerSummary, DockerOverview, DockerService, ImageSummary,
+    NetworkSummary, ResourceQuery, StatusLevel, VolumeSummary,
 };
 
 #[derive(Debug)]
@@ -28,6 +28,7 @@ pub struct App {
     pub sort: SortMode,
     pub selected_keys: BTreeSet<String>,
     pub recent_actions: Vec<String>,
+    pub wizard: CreateWizardState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub enum Screen {
     MainMenu,
     ResourceList(ResourceKind),
     TextView(TextViewState),
+    CreateWizard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,10 +151,53 @@ pub enum AppCommand {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateWizardState {
+    pub step: CreateWizardStep,
+    pub image_mode: ImageInputMode,
+    pub image_index: usize,
+    pub image_value: String,
+    pub name_value: String,
+    pub ports_value: String,
+    pub volumes_value: String,
+    pub env_value: String,
+    pub input_buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateWizardStep {
+    Image,
+    Name,
+    Ports,
+    Volumes,
+    Env,
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageInputMode {
+    Select,
+    Manual,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateWizardView {
+    pub step: CreateWizardStep,
+    pub title: String,
+    pub prompt: String,
+    pub guidance: String,
+    pub input_value: String,
+    pub image_mode: ImageInputMode,
+    pub image_rows: Vec<String>,
+    pub image_index: usize,
+    pub summary_lines: Vec<String>,
+}
+
 impl App {
     pub fn new(config: AppConfig) -> Self {
         let docker_service = DockerService::new(&config.docker);
         let docker = docker_service.inspect();
+        let wizard = CreateWizardState::new(&docker);
 
         Self {
             config,
@@ -175,6 +220,7 @@ impl App {
             sort: SortMode::NameAsc,
             selected_keys: BTreeSet::new(),
             recent_actions: vec!["Opened dockers.".to_string()],
+            wizard,
         }
     }
 
@@ -193,6 +239,11 @@ impl App {
 
         if self.search_mode {
             self.handle_search_key(key);
+            return None;
+        }
+
+        if self.screen == Screen::CreateWizard {
+            self.handle_wizard_key(key);
             return None;
         }
 
@@ -227,8 +278,9 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.search_mode = true;
-                self.status_message = "Search mode: type to filter rows, Enter to apply, Esc to cancel."
-                    .to_string();
+                self.status_message =
+                    "Search mode: type to filter rows, Enter to apply, Esc to cancel."
+                        .to_string();
                 None
             }
             KeyCode::Char('f') => {
@@ -247,8 +299,12 @@ impl App {
                 self.toggle_select_all_visible();
                 None
             }
+            KeyCode::Char('n') => {
+                self.open_create_wizard();
+                None
+            }
             KeyCode::Char('?') => {
-                self.status_message = "Keys: / search, f filter, o sort, Space select, a select all, r refresh. Containers add s/t/R/d/g/i/e actions.".to_string();
+                self.status_message = "Keys: / search, f filter, o sort, Space select, a select all, n new container, r refresh. Containers add s/t/R/d/g/i/e actions.".to_string();
                 None
             }
             _ => self.handle_context_key(key),
@@ -308,6 +364,10 @@ impl App {
         }
     }
 
+    pub fn wizard_view(&self) -> CreateWizardView {
+        self.wizard.view(&self.docker)
+    }
+
     pub fn resource_list_state(&self, kind: ResourceKind) -> ResourceListState {
         let (title, detail, preview, status, base_rows, action_hint) = match kind {
             ResourceKind::Containers => {
@@ -318,7 +378,7 @@ impl App {
                     query.preview(),
                     query.status.level,
                     self.build_container_rows(query),
-                    "s start, t stop, R restart, d delete, g logs, i inspect, e shell",
+                    "n wizard, s start, t stop, R restart, d delete, g logs, i inspect, e shell",
                 )
             }
             ResourceKind::Images => {
@@ -529,6 +589,7 @@ impl App {
                     .unwrap_or_else(|| "No rows available".to_string())
             }
             Screen::TextView(state) => self.text_view_content(state).subtitle,
+            Screen::CreateWizard => self.wizard_view().guidance,
         }
     }
 
@@ -569,14 +630,17 @@ impl App {
 
     pub fn help_text(&self) -> &'static str {
         match self.screen {
-            Screen::MainMenu => "Up/Down move  Enter open  q quit  ? help",
+            Screen::MainMenu => "Up/Down move  Enter open  n new container  q quit  ? help",
             Screen::ResourceList(ResourceKind::Containers) => {
-                "/ search  f filter  o sort  Space select  a select all  s/t/R/d/g/i/e actions"
+                "/ search  f filter  o sort  Space select  a select all  n wizard  s/t/R/d/g/i/e actions"
             }
             Screen::ResourceList(_) => {
                 "/ search  f filter  o sort  Space select  a select all  i inspect  d delete"
             }
             Screen::TextView(_) => "Esc back  q quit  r refresh",
+            Screen::CreateWizard => {
+                "Wizard: type input  Enter next  Tab image mode  Up/Down image select  Backspace edit  Esc cancel"
+            }
         }
     }
 
@@ -588,6 +652,8 @@ impl App {
             format!("{glyph} loading docker data...")
         } else if self.search_mode {
             format!("{glyph} search: {}", self.search_query)
+        } else if self.screen == Screen::CreateWizard {
+            format!("{glyph} wizard step: {}", self.wizard.step.label())
         } else {
             format!("{glyph} idle")
         }
@@ -635,6 +701,10 @@ impl App {
                     None
                 }
                 KeyCode::Char('e') => self.open_shell(),
+                KeyCode::Char('n') => {
+                    self.open_create_wizard();
+                    None
+                }
                 _ => None,
             },
             Screen::ResourceList(ResourceKind::Images) => match key {
@@ -670,7 +740,7 @@ impl App {
                 }
                 _ => None,
             },
-            Screen::TextView(_) => None,
+            Screen::TextView(_) | Screen::CreateWizard => None,
             _ => None,
         }
     }
@@ -732,10 +802,46 @@ impl App {
         }
     }
 
+    fn handle_wizard_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Esc => {
+                self.screen = Screen::ResourceList(ResourceKind::Containers);
+                self.status_message = "Container creation wizard cancelled.".to_string();
+            }
+            KeyCode::Tab if self.wizard.step == CreateWizardStep::Image => {
+                self.wizard.toggle_image_mode();
+                self.status_message = format!(
+                    "Image mode set to {}.",
+                    self.wizard.image_mode.label()
+                );
+            }
+            KeyCode::Up if self.wizard.step == CreateWizardStep::Image => {
+                self.wizard.move_image_selection(-1, &self.docker);
+            }
+            KeyCode::Down if self.wizard.step == CreateWizardStep::Image => {
+                self.wizard.move_image_selection(1, &self.docker);
+            }
+            KeyCode::Backspace => {
+                self.wizard.input_buffer.pop();
+            }
+            KeyCode::Enter => {
+                self.advance_wizard();
+            }
+            KeyCode::Char(c) => {
+                self.wizard.input_buffer.push(c);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_escape(&mut self) {
         match self.screen {
             Screen::MainMenu => self.open_quit_confirm(),
             Screen::ResourceList(_) | Screen::TextView(_) => self.go_back(),
+            Screen::CreateWizard => {
+                self.screen = Screen::ResourceList(ResourceKind::Containers);
+                self.status_message = "Container creation wizard cancelled.".to_string();
+            }
         }
     }
 
@@ -751,7 +857,7 @@ impl App {
                     self.list_index -= 1;
                 }
             }
-            Screen::TextView(_) => {}
+            Screen::TextView(_) | Screen::CreateWizard => {}
         }
     }
 
@@ -769,7 +875,7 @@ impl App {
                     self.list_index += 1;
                 }
             }
-            Screen::TextView(_) => {}
+            Screen::TextView(_) | Screen::CreateWizard => {}
         }
     }
 
@@ -787,7 +893,7 @@ impl App {
             Screen::ResourceList(kind) => {
                 self.open_text_view_for(kind, TextViewKind::Inspect);
             }
-            Screen::TextView(_) => {}
+            Screen::TextView(_) | Screen::CreateWizard => {}
         }
     }
 
@@ -803,6 +909,10 @@ impl App {
                 self.screen = Screen::ResourceList(state.source);
                 self.status_message = format!("Returned to {} list.", state.source.label());
             }
+            Screen::CreateWizard => {
+                self.screen = Screen::ResourceList(ResourceKind::Containers);
+                self.status_message = "Returned to container list.".to_string();
+            }
             Screen::MainMenu => {}
         }
     }
@@ -814,6 +924,7 @@ impl App {
 
         let docker_service = DockerService::new(&self.config.docker);
         self.docker = docker_service.inspect();
+        self.wizard.sync_after_refresh(&self.docker);
         self.is_loading = false;
 
         if self.has_errors() {
@@ -1012,6 +1123,95 @@ impl App {
             container_id,
             container_name,
         })
+    }
+
+    fn open_create_wizard(&mut self) {
+        self.wizard.reset_for_open(&self.docker);
+        self.screen = Screen::CreateWizard;
+        self.error_message = None;
+        self.status_message =
+            "Opened container creation wizard. Follow the steps and press Enter to continue."
+                .to_string();
+        self.push_recent_action("Opened container creation wizard.".to_string());
+    }
+
+    fn advance_wizard(&mut self) {
+        match self.wizard.step {
+            CreateWizardStep::Image => {
+                if self.wizard.commit_image_step(&self.docker).is_err() {
+                    self.error_message = Some("Choose or enter an image before continuing.".to_string());
+                    return;
+                }
+                self.wizard.step = CreateWizardStep::Name;
+                self.status_message = "Container name step.".to_string();
+            }
+            CreateWizardStep::Name => {
+                self.wizard.name_value = self.wizard.input_buffer.trim().to_string();
+                self.wizard.input_buffer = self.wizard.ports_value.clone();
+                self.wizard.step = CreateWizardStep::Ports;
+                self.status_message = "Port mapping step.".to_string();
+            }
+            CreateWizardStep::Ports => {
+                self.wizard.ports_value = self.wizard.input_buffer.trim().to_string();
+                self.wizard.input_buffer = self.wizard.volumes_value.clone();
+                self.wizard.step = CreateWizardStep::Volumes;
+                self.status_message = "Volume mount step.".to_string();
+            }
+            CreateWizardStep::Volumes => {
+                self.wizard.volumes_value = self.wizard.input_buffer.trim().to_string();
+                self.wizard.input_buffer = self.wizard.env_value.clone();
+                self.wizard.step = CreateWizardStep::Env;
+                self.status_message = "Environment variable step.".to_string();
+            }
+            CreateWizardStep::Env => {
+                self.wizard.env_value = self.wizard.input_buffer.trim().to_string();
+                self.wizard.input_buffer.clear();
+                self.wizard.step = CreateWizardStep::Summary;
+                self.status_message = "Review the summary and press Enter to create the container."
+                    .to_string();
+            }
+            CreateWizardStep::Summary => {
+                self.execute_create_wizard();
+            }
+        }
+    }
+
+    fn execute_create_wizard(&mut self) {
+        let image = if self.wizard.image_value.trim().is_empty() {
+            self.error_message = Some("Image is required.".to_string());
+            return;
+        } else {
+            self.wizard.image_value.trim().to_string()
+        };
+
+        let request = ContainerCreateRequest {
+            image,
+            name: blank_to_none(&self.wizard.name_value),
+            ports: parse_csv_list(&self.wizard.ports_value),
+            volumes: parse_csv_list(&self.wizard.volumes_value),
+            env: parse_csv_list(&self.wizard.env_value),
+        };
+
+        self.is_loading = true;
+        let service = DockerService::new(&self.config.docker);
+        let result = service.create_container(&request);
+        self.is_loading = false;
+
+        match result {
+            Ok(output) => {
+                self.status_message = format!("Container created. {}", output.trim());
+                self.push_recent_action(self.status_message.clone());
+                self.error_message = None;
+                self.screen = Screen::ResourceList(ResourceKind::Containers);
+                self.wizard = CreateWizardState::new(&self.docker);
+                self.refresh();
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = "Container creation failed. Review the error panel."
+                    .to_string();
+            }
+        }
     }
 
     fn execute_confirm_action(&mut self, action: ConfirmAction) -> Option<AppCommand> {
@@ -1468,6 +1668,204 @@ impl SortMode {
     }
 }
 
+impl CreateWizardState {
+    pub fn new(docker: &DockerOverview) -> Self {
+        let mut wizard = Self {
+            step: CreateWizardStep::Image,
+            image_mode: ImageInputMode::Select,
+            image_index: 0,
+            image_value: String::new(),
+            name_value: String::new(),
+            ports_value: String::new(),
+            volumes_value: String::new(),
+            env_value: String::new(),
+            input_buffer: String::new(),
+        };
+        wizard.sync_after_refresh(docker);
+        wizard
+    }
+
+    pub fn reset_for_open(&mut self, docker: &DockerOverview) {
+        *self = Self::new(docker);
+    }
+
+    pub fn sync_after_refresh(&mut self, docker: &DockerOverview) {
+        let image_count = docker.resources.images.items.len();
+        if image_count == 0 {
+            self.image_index = 0;
+            self.image_mode = ImageInputMode::Manual;
+            if self.image_value.is_empty() {
+                self.input_buffer = self.image_value.clone();
+            }
+        } else if self.image_index >= image_count {
+            self.image_index = image_count - 1;
+        }
+    }
+
+    pub fn toggle_image_mode(&mut self) {
+        self.image_mode = match self.image_mode {
+            ImageInputMode::Select => {
+                self.input_buffer = self.image_value.clone();
+                ImageInputMode::Manual
+            }
+            ImageInputMode::Manual => ImageInputMode::Select,
+        };
+    }
+
+    pub fn move_image_selection(&mut self, delta: isize, docker: &DockerOverview) {
+        let len = docker.resources.images.items.len();
+        if len == 0 {
+            return;
+        }
+
+        if delta < 0 {
+            self.image_index = self.image_index.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.image_index = (self.image_index + delta as usize).min(len.saturating_sub(1));
+        }
+    }
+
+    pub fn commit_image_step(&mut self, docker: &DockerOverview) -> Result<(), ()> {
+        match self.image_mode {
+            ImageInputMode::Select => {
+                let Some(image) = docker.resources.images.items.get(self.image_index) else {
+                    return Err(());
+                };
+                self.image_value = format!("{}:{}", image.repository, image.tag);
+                self.input_buffer = self.name_value.clone();
+                Ok(())
+            }
+            ImageInputMode::Manual => {
+                if self.input_buffer.trim().is_empty() {
+                    return Err(());
+                }
+                self.image_value = self.input_buffer.trim().to_string();
+                self.input_buffer = self.name_value.clone();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn view(&self, docker: &DockerOverview) -> CreateWizardView {
+        let image_rows = docker
+            .resources
+            .images
+            .items
+            .iter()
+            .map(|image| format!("{}:{}", image.repository, image.tag))
+            .collect::<Vec<_>>();
+
+        let input_value = match self.step {
+            CreateWizardStep::Image => match self.image_mode {
+                ImageInputMode::Select => self
+                    .selected_image_label(docker)
+                    .unwrap_or_else(|| "No images available".to_string()),
+                ImageInputMode::Manual => self.input_buffer.clone(),
+            },
+            _ => self.input_buffer.clone(),
+        };
+
+        CreateWizardView {
+            step: self.step,
+            title: format!("Create Container / {}", self.step.label()),
+            prompt: self.step.prompt(),
+            guidance: self.step.guidance(),
+            input_value,
+            image_mode: self.image_mode,
+            image_rows,
+            image_index: self.image_index,
+            summary_lines: self.summary_lines(),
+        }
+    }
+
+    fn selected_image_label(&self, docker: &DockerOverview) -> Option<String> {
+        docker
+            .resources
+            .images
+            .items
+            .get(self.image_index)
+            .map(|image| format!("{}:{}", image.repository, image.tag))
+    }
+
+    fn summary_lines(&self) -> Vec<String> {
+        vec![
+            format!("Image: {}", blank_display(&self.image_value)),
+            format!("Name: {}", blank_display(&self.name_value)),
+            format!("Ports: {}", blank_display(&self.ports_value)),
+            format!("Volumes: {}", blank_display(&self.volumes_value)),
+            format!("Env: {}", blank_display(&self.env_value)),
+        ]
+    }
+}
+
+impl CreateWizardStep {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CreateWizardStep::Image => "image",
+            CreateWizardStep::Name => "name",
+            CreateWizardStep::Ports => "ports",
+            CreateWizardStep::Volumes => "volumes",
+            CreateWizardStep::Env => "environment",
+            CreateWizardStep::Summary => "summary",
+        }
+    }
+
+    pub fn prompt(&self) -> String {
+        match self {
+            CreateWizardStep::Image => "Choose an image from the list or switch to manual input."
+                .to_string(),
+            CreateWizardStep::Name => "Enter a container name. Leave empty to let Docker choose."
+                .to_string(),
+            CreateWizardStep::Ports => {
+                "Enter port mappings separated by commas, e.g. `8080:80, 8443:443`.".to_string()
+            }
+            CreateWizardStep::Volumes => {
+                "Enter volume mounts separated by commas, e.g. `/host:/app, data:/data`."
+                    .to_string()
+            }
+            CreateWizardStep::Env => {
+                "Enter environment variables separated by commas, e.g. `KEY=VALUE, MODE=dev`."
+                    .to_string()
+            }
+            CreateWizardStep::Summary => {
+                "Review the request below. Press Enter to run `docker run -d`.".to_string()
+            }
+        }
+    }
+
+    pub fn guidance(&self) -> String {
+        match self {
+            CreateWizardStep::Image => {
+                "Tab toggles between image selection and manual image input.".to_string()
+            }
+            CreateWizardStep::Name => {
+                "Names help later management, but this step is optional.".to_string()
+            }
+            CreateWizardStep::Ports => {
+                "Each mapping should follow `host:container`.".to_string()
+            }
+            CreateWizardStep::Volumes => {
+                "Each mount should follow `source:target[:ro]`.".to_string()
+            }
+            CreateWizardStep::Env => {
+                "Each environment entry should follow `KEY=VALUE`.".to_string()
+            }
+            CreateWizardStep::Summary => {
+                "Creation runs in detached mode and returns the created container id.".to_string()
+            }
+        }
+    }
+}
+
+impl ImageInputMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ImageInputMode::Select => "select",
+            ImageInputMode::Manual => "manual",
+        }
+    }
+}
+
 struct GenericResourceStatus {
     status: StatusLevel,
 }
@@ -1477,5 +1875,31 @@ impl<T> From<&ResourceQuery<T>> for GenericResourceStatus {
         Self {
             status: value.status.level,
         }
+    }
+}
+
+fn parse_csv_list(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn blank_display(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "(empty)"
+    } else {
+        value
+    }
+}
+
+fn blank_to_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }

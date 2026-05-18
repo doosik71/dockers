@@ -26,6 +26,15 @@ pub struct DockerResourceOverview {
 }
 
 #[derive(Debug, Clone)]
+pub struct ContainerCreateRequest {
+    pub image: String,
+    pub name: Option<String>,
+    pub ports: Vec<String>,
+    pub volumes: Vec<String>,
+    pub env: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResourceQuery<T> {
     pub label: &'static str,
     pub items: Vec<T>,
@@ -205,6 +214,34 @@ impl DockerService {
             .run(["network", "inspect", network_id])
             .map(|output| output.stdout)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn create_container(&self, request: &ContainerCreateRequest) -> Result<String, String> {
+        let mut args = vec!["run".to_string(), "-d".to_string()];
+
+        if let Some(name) = &request.name {
+            args.push("--name".to_string());
+            args.push(name.clone());
+        }
+
+        for port in &request.ports {
+            args.push("-p".to_string());
+            args.push(port.clone());
+        }
+
+        for volume in &request.volumes {
+            args.push("-v".to_string());
+            args.push(volume.clone());
+        }
+
+        for env in &request.env {
+            args.push("-e".to_string());
+            args.push(env.clone());
+        }
+
+        args.push(request.image.clone());
+
+        self.run_simple_action(args, "container created")
     }
 
     fn inspect_environment(&self) -> DockerEnvironmentStatus {
