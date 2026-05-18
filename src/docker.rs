@@ -4,11 +4,32 @@ use crate::config::{DockerConfig, DockerOutputFormat};
 use crate::process::{CommandOutput, DockerCommandRunner};
 
 #[derive(Debug, Clone)]
+pub struct DockerOverview {
+    pub environment: DockerEnvironmentStatus,
+    pub resources: DockerResourceOverview,
+}
+
+#[derive(Debug, Clone)]
 pub struct DockerEnvironmentStatus {
     pub installation: StatusLine,
     pub daemon: StatusLine,
     pub version: StatusLine,
     pub output_strategy: StatusLine,
+}
+
+#[derive(Debug, Clone)]
+pub struct DockerResourceOverview {
+    pub containers: ResourceQuery<ContainerSummary>,
+    pub images: ResourceQuery<ImageSummary>,
+    pub volumes: ResourceQuery<VolumeSummary>,
+    pub networks: ResourceQuery<NetworkSummary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceQuery<T> {
+    pub label: &'static str,
+    pub items: Vec<T>,
+    pub status: StatusLine,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +47,60 @@ pub enum StatusLevel {
     Info,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContainerSummary {
+    #[serde(rename = "ID")]
+    pub id: String,
+    #[serde(rename = "Names")]
+    pub names: String,
+    #[serde(rename = "Image")]
+    pub image: String,
+    #[serde(rename = "State")]
+    pub state: String,
+    #[serde(rename = "Status")]
+    pub status: String,
+    #[serde(rename = "Ports")]
+    pub ports: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImageSummary {
+    #[serde(rename = "ID")]
+    pub id: String,
+    #[serde(rename = "Repository")]
+    pub repository: String,
+    #[serde(rename = "Tag")]
+    pub tag: String,
+    #[serde(rename = "CreatedSince")]
+    pub created_since: String,
+    #[serde(rename = "Size")]
+    pub size: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VolumeSummary {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Driver")]
+    pub driver: String,
+    #[serde(rename = "Mountpoint")]
+    pub mountpoint: String,
+    #[serde(rename = "Scope")]
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkSummary {
+    #[serde(rename = "ID")]
+    pub id: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Driver")]
+    pub driver: String,
+    #[serde(rename = "Scope")]
+    pub scope: String,
+}
+
 pub struct DockerService {
     runner: DockerCommandRunner,
     output_format: DockerOutputFormat,
@@ -39,7 +114,17 @@ impl DockerService {
         }
     }
 
-    pub fn inspect_environment(&self) -> DockerEnvironmentStatus {
+    pub fn inspect(&self) -> DockerOverview {
+        let environment = self.inspect_environment();
+        let resources = self.inspect_resources(&environment);
+
+        DockerOverview {
+            environment,
+            resources,
+        }
+    }
+
+    fn inspect_environment(&self) -> DockerEnvironmentStatus {
         let installation_output = self.runner.run_captured(["--version"]);
 
         let installation = match installation_output {
@@ -80,10 +165,84 @@ impl DockerService {
         }
     }
 
+    fn inspect_resources(&self, environment: &DockerEnvironmentStatus) -> DockerResourceOverview {
+        if environment.installation.level == StatusLevel::Error {
+            return DockerResourceOverview {
+                containers: ResourceQuery::skipped(
+                    "Containers",
+                    "skipped because docker command is not available",
+                ),
+                images: ResourceQuery::skipped(
+                    "Images",
+                    "skipped because docker command is not available",
+                ),
+                volumes: ResourceQuery::skipped(
+                    "Volumes",
+                    "skipped because docker command is not available",
+                ),
+                networks: ResourceQuery::skipped(
+                    "Networks",
+                    "skipped because docker command is not available",
+                ),
+            };
+        }
+
+        if environment.daemon.level == StatusLevel::Error
+            || environment.daemon.level == StatusLevel::Warning
+        {
+            return DockerResourceOverview {
+                containers: ResourceQuery::skipped(
+                    "Containers",
+                    "skipped because docker daemon is not reachable",
+                ),
+                images: ResourceQuery::skipped(
+                    "Images",
+                    "skipped because docker daemon is not reachable",
+                ),
+                volumes: ResourceQuery::skipped(
+                    "Volumes",
+                    "skipped because docker daemon is not reachable",
+                ),
+                networks: ResourceQuery::skipped(
+                    "Networks",
+                    "skipped because docker daemon is not reachable",
+                ),
+            };
+        }
+
+        DockerResourceOverview {
+            containers: self.inspect_query(
+                "Containers",
+                ["ps", "-a", "--format", "{{json .}}"],
+                format!("loaded with {}", self.output_format_description()),
+            ),
+            images: self.inspect_query(
+                "Images",
+                ["images", "--format", "{{json .}}"],
+                format!("loaded with {}", self.output_format_description()),
+            ),
+            volumes: self.inspect_query(
+                "Volumes",
+                ["volume", "ls", "--format", "{{json .}}"],
+                format!("loaded with {}", self.output_format_description()),
+            ),
+            networks: self.inspect_query(
+                "Networks",
+                ["network", "ls", "--format", "{{json .}}"],
+                format!("loaded with {}", self.output_format_description()),
+            ),
+        }
+    }
+
     fn inspect_daemon(&self) -> StatusLine {
-        match self.runner.run_captured(["info", "--format", "{{json .ServerVersion}}"]) {
+        match self
+            .runner
+            .run_captured(["info", "--format", "{{json .ServerVersion}}"])
+        {
             Ok(output) if output.status_code == Some(0) => {
-                let server_version = self.parse_json_string(&output).unwrap_or_else(|_| "available".to_string());
+                let server_version = self
+                    .parse_json_string(&output)
+                    .unwrap_or_else(|_| "available".to_string());
                 StatusLine::ok("Docker daemon", format!("reachable (server {server_version})"))
             }
             Ok(output) => StatusLine::warning(
@@ -96,25 +255,81 @@ impl DockerService {
 
     fn inspect_version(&self) -> StatusLine {
         match self.runner.run_captured(["version", "--format", "{{json .}}"]) {
-            Ok(output) if output.status_code == Some(0) => match serde_json::from_str::<DockerVersionInfo>(&output.stdout) {
-                Ok(version) => {
-                    let client = version.client.version.unwrap_or_else(|| "unknown".to_string());
-                    let server = version
-                        .server
-                        .and_then(|server| server.version)
-                        .unwrap_or_else(|| "unavailable".to_string());
-                    StatusLine::ok("Docker version", format!("client {client}, server {server}"))
+            Ok(output) if output.status_code == Some(0) => {
+                match serde_json::from_str::<DockerVersionInfo>(&output.stdout) {
+                    Ok(version) => {
+                        let client = version
+                            .client
+                            .version
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let server = version
+                            .server
+                            .and_then(|server| server.version)
+                            .unwrap_or_else(|| "unavailable".to_string());
+                        StatusLine::ok("Docker version", format!("client {client}, server {server}"))
+                    }
+                    Err(error) => StatusLine::warning(
+                        "Docker version",
+                        format!("version command succeeded but JSON parsing failed: {error}"),
+                    ),
                 }
-                Err(error) => StatusLine::warning(
-                    "Docker version",
-                    format!("version command succeeded but JSON parsing failed: {error}"),
-                ),
-            },
+            }
             Ok(output) => StatusLine::warning(
                 "Docker version",
                 format_command_failure(&output, "failed to query docker version"),
             ),
             Err(error) => StatusLine::error("Docker version", error.to_string()),
+        }
+    }
+
+    fn inspect_query<T, I, S>(
+        &self,
+        label: &'static str,
+        args: I,
+        success_detail: String,
+    ) -> ResourceQuery<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        match self.runner.run_captured(args) {
+            Ok(output) if output.status_code == Some(0) => match parse_json_lines::<T>(&output.stdout) {
+                Ok(items) => {
+                    let detail = if items.is_empty() {
+                        format!("0 items; {success_detail}")
+                    } else {
+                        format!("{} items; {success_detail}", items.len())
+                    };
+
+                    ResourceQuery {
+                        label,
+                        items,
+                        status: StatusLine::ok(label, detail),
+                    }
+                }
+                Err(error) => ResourceQuery {
+                    label,
+                    items: Vec::new(),
+                    status: StatusLine::warning(
+                        label,
+                        format!("query succeeded but JSON parsing failed: {error}"),
+                    ),
+                },
+            },
+            Ok(output) => ResourceQuery {
+                label,
+                items: Vec::new(),
+                status: StatusLine::warning(
+                    label,
+                    format_command_failure(&output, &format!("failed to load {label}")),
+                ),
+            },
+            Err(error) => ResourceQuery {
+                label,
+                items: Vec::new(),
+                status: StatusLine::error(label, format!("failed to load {label}: {error}")),
+            },
         }
     }
 
@@ -128,8 +343,60 @@ impl DockerService {
         StatusLine::info("Output strategy", detail)
     }
 
+    fn output_format_description(&self) -> &'static str {
+        match self.output_format {
+            DockerOutputFormat::Json => "JSON lines via `--format {{json .}}`",
+        }
+    }
+
     fn parse_json_string(&self, output: &CommandOutput) -> Result<String, serde_json::Error> {
         serde_json::from_str::<String>(&output.stdout)
+    }
+}
+
+impl<T> ResourceQuery<T> {
+    pub fn skipped(label: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            label,
+            items: Vec::new(),
+            status: StatusLine::warning(label, detail),
+        }
+    }
+}
+
+impl ResourceQuery<ContainerSummary> {
+    pub fn preview(&self) -> String {
+        self.items
+            .first()
+            .map(ContainerSummary::preview)
+            .unwrap_or_else(|| "no container rows loaded".to_string())
+    }
+}
+
+impl ResourceQuery<ImageSummary> {
+    pub fn preview(&self) -> String {
+        self.items
+            .first()
+            .map(ImageSummary::preview)
+            .unwrap_or_else(|| "no image rows loaded".to_string())
+    }
+}
+
+impl ResourceQuery<VolumeSummary> {
+    pub fn preview(&self) -> String {
+        self.items
+            .first()
+            .map(VolumeSummary::preview)
+            .unwrap_or_else(|| "no volume rows loaded".to_string())
+    }
+}
+
+impl ResourceQuery<NetworkSummary> {
+    pub fn preview(&self) -> String {
+        self.items
+            .first()
+            .map(NetworkSummary::preview)
+            .unwrap_or_else(|| "no network rows loaded".to_string())
     }
 }
 
@@ -167,6 +434,48 @@ impl StatusLine {
     }
 }
 
+impl ContainerSummary {
+    pub fn preview(&self) -> String {
+        let ports = if self.ports.is_empty() {
+            "no published ports"
+        } else {
+            &self.ports
+        };
+
+        format!(
+            "{} ({}) image={} state={} status={} ports={}",
+            self.names, self.id, self.image, self.state, self.status, ports
+        )
+    }
+}
+
+impl ImageSummary {
+    pub fn preview(&self) -> String {
+        format!(
+            "{}:{} ({}) size={} created={}",
+            self.repository, self.tag, self.id, self.size, self.created_since
+        )
+    }
+}
+
+impl VolumeSummary {
+    pub fn preview(&self) -> String {
+        format!(
+            "{} driver={} scope={} mountpoint={}",
+            self.name, self.driver, self.scope, self.mountpoint
+        )
+    }
+}
+
+impl NetworkSummary {
+    pub fn preview(&self) -> String {
+        format!(
+            "{} ({}) driver={} scope={}",
+            self.name, self.id, self.driver, self.scope
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct DockerVersionInfo {
     #[serde(rename = "Client")]
@@ -179,6 +488,17 @@ struct DockerVersionInfo {
 struct DockerVersionComponent {
     #[serde(rename = "Version")]
     version: Option<String>,
+}
+
+fn parse_json_lines<T>(stdout: &str) -> Result<Vec<T>, serde_json::Error>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<T>)
+        .collect()
 }
 
 fn format_command_failure(output: &CommandOutput, fallback: &str) -> String {

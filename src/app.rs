@@ -1,10 +1,10 @@
 use crate::config::AppConfig;
-use crate::docker::{DockerEnvironmentStatus, DockerService};
+use crate::docker::{DockerOverview, DockerService};
 
 #[derive(Debug)]
 pub struct App {
     pub config: AppConfig,
-    pub docker: DockerEnvironmentStatus,
+    pub docker: DockerOverview,
     pub title: &'static str,
     pub should_quit: bool,
 }
@@ -12,7 +12,7 @@ pub struct App {
 impl App {
     pub fn new(config: AppConfig) -> Self {
         let docker_service = DockerService::new(&config.docker);
-        let docker = docker_service.inspect_environment();
+        let docker = docker_service.inspect();
 
         Self {
             config,

@@ -25,16 +25,33 @@ pub fn render(frame: &mut Frame, app: &App) {
         } else {
             "off"
         },
-        app.docker.installation.label,
-        app.docker.installation.detail,
-        app.docker.daemon.label,
-        app.docker.daemon.detail,
-        app.docker.version.label,
-        app.docker.version.detail,
-        app.docker.output_strategy.label,
-        app.docker.output_strategy.detail,
+        app.docker.environment.installation.label,
+        app.docker.environment.installation.detail,
+        app.docker.environment.daemon.label,
+        app.docker.environment.daemon.detail,
+        app.docker.environment.version.label,
+        app.docker.environment.version.detail,
+        app.docker.environment.output_strategy.label,
+        app.docker.environment.output_strategy.detail,
     ))
     .block(Block::default().borders(Borders::ALL).title("Home"));
+
+    let resources = Paragraph::new(format!(
+        "Resource queries:\n- {}: {}\n  preview: {}\n- {}: {}\n  preview: {}\n- {}: {}\n  preview: {}\n- {}: {}\n  preview: {}",
+        app.docker.resources.containers.label,
+        app.docker.resources.containers.status.detail,
+        app.docker.resources.containers.preview(),
+        app.docker.resources.images.label,
+        app.docker.resources.images.status.detail,
+        app.docker.resources.images.preview(),
+        app.docker.resources.volumes.label,
+        app.docker.resources.volumes.status.detail,
+        app.docker.resources.volumes.preview(),
+        app.docker.resources.networks.label,
+        app.docker.resources.networks.status.detail,
+        app.docker.resources.networks.preview(),
+    ))
+    .block(Block::default().borders(Borders::ALL).title("Resources"));
 
     let footer = Paragraph::new("Press q or Esc to quit")
         .block(Block::default().borders(Borders::ALL).title("Help"));
@@ -53,16 +70,26 @@ pub fn render(frame: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("dockers"))
         .style(header_style);
 
+    let middle = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(areas[1]);
+
     frame.render_widget(header, areas[0]);
-    frame.render_widget(body, areas[1]);
+    frame.render_widget(body, middle[0]);
+    frame.render_widget(resources, middle[1]);
     frame.render_widget(footer, areas[2]);
 }
 
 fn overall_status(app: &App) -> StatusLevel {
     let levels = [
-        app.docker.installation.level,
-        app.docker.daemon.level,
-        app.docker.version.level,
+        app.docker.environment.installation.level,
+        app.docker.environment.daemon.level,
+        app.docker.environment.version.level,
+        app.docker.resources.containers.status.level,
+        app.docker.resources.images.status.level,
+        app.docker.resources.volumes.status.level,
+        app.docker.resources.networks.status.level,
     ];
 
     if levels.contains(&StatusLevel::Error) {
