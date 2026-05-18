@@ -1,7 +1,7 @@
 use std::io::{self, stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -41,6 +41,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::render(frame, app))?;
+        app.tick();
 
         if !event::poll(Duration::from_millis(200))? {
             continue;
@@ -54,10 +55,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             continue;
         }
 
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => app.quit(),
-            _ => {}
-        }
+        app.handle_key(key.code);
     }
 
     Ok(())
