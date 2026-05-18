@@ -19,9 +19,12 @@ pub fn render(frame: &mut Frame, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("dockers"))
         .style(Style::default().add_modifier(Modifier::BOLD));
 
-    let body = Paragraph::new(
-        "Docker를 텍스트 콘솔에서 쉽게 다루기 위한 TUI 골격입니다.\n\n다음 단계:\n- Docker 연결 확인\n- 리소스 목록 화면 추가\n- 작업 메뉴 연결",
-    )
+    let body = Paragraph::new(format!(
+        "Docker를 텍스트 콘솔에서 쉽게 다루기 위한 TUI 골격입니다.\n\n설정 초안:\n- docker command: {}\n- log level: {}\n- file logging: {}\n\n다음 단계:\n- Docker 연결 확인\n- 리소스 목록 화면 추가\n- 작업 메뉴 연결",
+        app.config.docker.command,
+        app.config.logging.level,
+        if app.config.logging.write_to_file { "on" } else { "off" }
+    ))
     .block(Block::default().borders(Borders::ALL).title("Home"));
 
     let footer = Paragraph::new("Press q or Esc to quit")

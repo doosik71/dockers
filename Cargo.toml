@@ -7,3 +7,6 @@ edition = "2024"
 color-eyre = "0.6"
 crossterm = "0.28"
 ratatui = "0.28"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
