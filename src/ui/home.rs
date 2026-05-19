@@ -1,7 +1,7 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use crate::app::App;
 use crate::docker::StatusLevel;
@@ -66,7 +66,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         StatusLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     };
 
-    let header = Paragraph::new(app.title)
+    let header = Paragraph::new("dockers")
         .block(Block::default().borders(Borders::ALL).title("dockers"))
         .style(header_style);
 

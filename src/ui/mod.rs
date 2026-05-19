@@ -6,6 +6,8 @@ use ratatui::Frame;
 use crate::app::{App, ConfirmState, ResourceKind, Screen};
 
 pub fn render(frame: &mut Frame, app: &App) {
+    widgets::render_background(frame);
+
     let areas = layout::main_areas(frame);
 
     widgets::render_header(frame, areas.header, app);
@@ -13,10 +15,13 @@ pub fn render(frame: &mut Frame, app: &App) {
     widgets::render_help(frame, areas.help, app);
 
     match app.screen {
-        Screen::MainMenu => widgets::render_main_menu(frame, areas.content, app),
         Screen::ResourceList(kind) => render_resource_list(frame, areas.content, app, kind),
-        Screen::TextView(state) => widgets::render_text_view(frame, areas.content, &app.text_view_content(state)),
-        Screen::CreateWizard => widgets::render_create_wizard(frame, areas.content, &app.wizard_view()),
+        Screen::TextView(state) => {
+            widgets::render_text_view(frame, areas.content, &app.text_view_content(state))
+        }
+        Screen::CreateWizard => {
+            widgets::render_create_wizard(frame, areas.content, &app.wizard_view())
+        }
     }
 
     if let Some(error) = &app.error_message {
@@ -28,9 +33,14 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_resource_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &App, kind: ResourceKind) {
+fn render_resource_list(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    app: &App,
+    kind: ResourceKind,
+) {
     let state = app.resource_list_state(kind);
-    widgets::render_resource_list(frame, area, app, &state);
+    widgets::render_resource_list(frame, area, app, kind, &state);
 }
 
 fn render_confirm(frame: &mut Frame, confirm: &ConfirmState) {

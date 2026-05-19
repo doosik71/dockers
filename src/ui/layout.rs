@@ -1,5 +1,5 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::Frame;
 
 pub struct MainAreas {
     pub header: Rect,

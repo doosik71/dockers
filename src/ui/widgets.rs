@@ -1,116 +1,168 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Frame;
 
-use crate::app::{App, ConfirmState, CreateWizardStep, CreateWizardView, ImageInputMode, ResourceListState, Screen, TextViewContent};
+use crate::app::{
+    App, ConfirmState, CreateWizardStep, CreateWizardView, ImageInputMode, ResourceActionButton,
+    ResourceFocus, ResourceKind, ResourceListState, Screen, TextViewContent,
+};
 use crate::docker::StatusLevel;
 
+const BG: Color = Color::Rgb(18, 22, 27);
+const PANEL: Color = Color::Rgb(30, 36, 43);
+const PANEL_ALT: Color = Color::Rgb(38, 45, 54);
+const FG: Color = Color::Rgb(232, 238, 243);
+const MUTED: Color = Color::Rgb(156, 168, 179);
+const BORDER: Color = Color::Rgb(90, 103, 116);
+const ACCENT: Color = Color::Rgb(73, 180, 190);
+const ACCENT_DARK: Color = Color::Rgb(12, 64, 73);
+const HOTKEY: Color = Color::Rgb(255, 214, 102);
+const OK: Color = Color::Rgb(117, 216, 128);
+const WARN: Color = Color::Rgb(255, 196, 87);
+const ERROR: Color = Color::Rgb(255, 118, 118);
+const SELECT_BG: Color = Color::Rgb(58, 104, 117);
+
+pub fn render_background(frame: &mut Frame) {
+    frame.render_widget(Block::default().style(base_style()), frame.area());
+}
+
+fn base_style() -> Style {
+    Style::default().fg(FG).bg(BG)
+}
+
+fn panel_style() -> Style {
+    Style::default().fg(FG).bg(PANEL)
+}
+
+fn muted_style() -> Style {
+    Style::default().fg(MUTED).bg(PANEL)
+}
+
+fn label_style() -> Style {
+    Style::default()
+        .fg(FG)
+        .bg(PANEL)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn block(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title.into())
+        .style(panel_style())
+        .border_style(Style::default().fg(BORDER).bg(PANEL))
+}
+
+fn focused_block(title: impl Into<String>, focused: bool) -> Block<'static> {
+    let border = if focused { HOTKEY } else { BORDER };
+    block(title).border_style(Style::default().fg(border).bg(PANEL))
+}
+
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let style = match overall_status(app) {
-        StatusLevel::Ok | StatusLevel::Info => Style::default()
-            .fg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        StatusLevel::Warning => Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        StatusLevel::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    let active = app.active_resource_kind();
+    let mut spans = Vec::new();
+
+    for (index, kind) in [
+        ResourceKind::Containers,
+        ResourceKind::Images,
+        ResourceKind::Volumes,
+        ResourceKind::Networks,
+    ]
+    .iter()
+    .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::styled("  ", panel_style()));
+        }
+        spans.extend(menu_button_spans(index + 1, *kind, *kind == active));
+    }
+
+    let border = match overall_status(app) {
+        StatusLevel::Ok | StatusLevel::Info => BORDER,
+        StatusLevel::Warning => WARN,
+        StatusLevel::Error => ERROR,
     };
 
-    let subtitle = match app.screen {
-        Screen::MainMenu => "Main Menu",
-        Screen::ResourceList(_) => "Resource List",
-        Screen::TextView(_) => "Text View",
-        Screen::CreateWizard => "Create Wizard",
-    };
-
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(app.title, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(subtitle, Style::default().fg(Color::DarkGray)),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("dockers"))
-    .style(style);
+    let header = Paragraph::new(Line::from(spans))
+        .block(block("Main Menu").border_style(Style::default().fg(border).bg(PANEL)))
+        .style(panel_style());
 
     frame.render_widget(header, area);
 }
 
-pub fn render_main_menu(frame: &mut Frame, area: Rect, app: &App) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(area);
+fn menu_button_spans(
+    function_number: usize,
+    kind: ResourceKind,
+    active: bool,
+) -> Vec<Span<'static>> {
+    let bg = if active { SELECT_BG } else { PANEL_ALT };
+    let label_style = Style::default().fg(FG).bg(bg).add_modifier(Modifier::BOLD);
+    let hotkey_style = Style::default()
+        .fg(HOTKEY)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
 
-    let items = app
-        .menu_items()
-        .into_iter()
-        .map(|item| ListItem::new(Line::from(vec![
-            Span::styled(item.label, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(item.detail, Style::default().fg(Color::Gray)),
-        ])))
-        .collect::<Vec<_>>();
-
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Main Menu"))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    let mut list_state = ListState::default().with_selected(Some(app.menu_index));
-    frame.render_stateful_widget(list, columns[0], &mut list_state);
-
-    let overview = Paragraph::new(format!(
-        "Choose a Docker resource category.\n\nSelection:\n{}\n\nSummary:\n{}\n\nEnvironment:\n- {}\n- {}\n- {}\n- {}",
-        app.menu_items()[app.menu_index].label,
-        app.selected_row_preview(),
-        app.docker.environment.installation.detail,
-        app.docker.environment.daemon.detail,
-        app.docker.environment.version.detail,
-        app.docker.environment.output_strategy.detail,
-    ))
-    .block(Block::default().borders(Borders::ALL).title("Overview"))
-    .wrap(Wrap { trim: true });
-
-    frame.render_widget(overview, columns[1]);
+    vec![
+        Span::styled("[", label_style),
+        Span::styled(format!("F{function_number}"), hotkey_style),
+        Span::styled(format!(" {}]", kind.title()), label_style),
+    ]
 }
 
-pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &ResourceListState) {
+pub fn render_resource_list(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    kind: ResourceKind,
+    state: &ResourceListState,
+) {
     let sections = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(area);
 
     let list_items = if state.rows.is_empty() {
-        vec![ListItem::new("No rows available")]
+        vec![ListItem::new(Line::from(Span::styled(
+            "No rows available",
+            muted_style(),
+        )))]
     } else {
         state
             .rows
             .iter()
             .map(|row| {
                 let marker = if row.selected { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{marker} {}", row.line))
+                let marker_style = if row.selected {
+                    Style::default()
+                        .fg(HOTKEY)
+                        .bg(PANEL)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    muted_style()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(" ", panel_style()),
+                    Span::styled(row.line.clone(), panel_style()),
+                ]))
             })
             .collect::<Vec<_>>()
     };
 
+    let list_focused = app.resource_focus == ResourceFocus::List;
+    let highlight_bg = if list_focused { SELECT_BG } else { PANEL_ALT };
     let list = List::new(list_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("{} / {}", state.title, query_label(app))),
-        )
+        .block(focused_block(
+            format!("{} / {}", state.title, query_label(app)),
+            list_focused,
+        ))
+        .style(panel_style())
         .highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(FG)
+                .bg(highlight_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(">> ");
@@ -123,66 +175,138 @@ pub fn render_resource_list(frame: &mut Frame, area: Rect, app: &App, state: &Re
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, sections[0], &mut list_state);
 
-    let detail_style = match state.status {
-        StatusLevel::Ok | StatusLevel::Info => Style::default().fg(Color::Green),
-        StatusLevel::Warning => Style::default().fg(Color::Yellow),
-        StatusLevel::Error => Style::default().fg(Color::Red),
-    };
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(8),
+        ])
+        .split(sections[1]);
 
+    render_action_buttons(frame, right[0], app, kind);
+    render_search_box(frame, right[1], app, state);
+
+    let details_focused = app.resource_focus == ResourceFocus::Details;
+    let detail_style = status_style(state.status);
     let detail = Paragraph::new(vec![
         Line::from(vec![
-            Span::styled("Query status: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Query status: ", label_style()),
             Span::styled(state.detail.clone(), detail_style),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Search: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(if state.search_query.is_empty() {
-                "(empty)".to_string()
-            } else {
-                state.search_query.clone()
-            }),
+            Span::styled("Filter: ", label_style()),
+            Span::styled(state.filter.label(), panel_style()),
+            Span::styled("   ", panel_style()),
+            Span::styled("Sort: ", label_style()),
+            Span::styled(state.sort.label(), panel_style()),
         ]),
         Line::from(vec![
-            Span::styled("Filter: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.filter.label()),
-            Span::raw("   "),
-            Span::styled("Sort: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.sort.label()),
-        ]),
-        Line::from(vec![
-            Span::styled("Counts: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "{} visible / {} total / {} selected",
-                state.visible_count, state.total_count, state.selected_count
-            )),
+            Span::styled("Counts: ", label_style()),
+            Span::styled(
+                format!(
+                    "{} visible / {} total / {} selected",
+                    state.visible_count, state.total_count, state.selected_count
+                ),
+                panel_style(),
+            ),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Selected row: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(app.selected_row_preview()),
+            Span::styled("Selected row: ", label_style()),
+            Span::styled(app.selected_row_preview(), panel_style()),
         ]),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("Preview: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.preview.clone()),
-        ]),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("Actions: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(state.action_hint),
+            Span::styled("Preview: ", label_style()),
+            Span::styled(state.preview.clone(), panel_style()),
         ]),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Details"))
+    .block(focused_block("Details", details_focused))
+    .style(panel_style())
+    .scroll((app.detail_scroll, 0))
     .wrap(Wrap { trim: true });
 
-    frame.render_widget(detail, sections[1]);
+    frame.render_widget(detail, right[2]);
+}
+
+fn render_action_buttons(frame: &mut Frame, area: Rect, app: &App, kind: ResourceKind) {
+    let actions = app.resource_actions(kind);
+    let focused = app.resource_focus == ResourceFocus::Actions;
+    let mut spans = Vec::new();
+
+    for (index, button) in actions.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" ", panel_style()));
+        }
+        spans.extend(action_button_spans(
+            *button,
+            focused && index == app.action_index,
+        ));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled("No actions available", muted_style()));
+    }
+
+    let actions = Paragraph::new(Line::from(spans))
+        .block(focused_block("Actions", focused))
+        .style(panel_style())
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(actions, area);
+}
+
+fn action_button_spans(button: ResourceActionButton, focused: bool) -> Vec<Span<'static>> {
+    let bg = if focused { ACCENT_DARK } else { PANEL_ALT };
+    let fg = if focused { FG } else { FG };
+    let style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+    let hotkey_style = Style::default()
+        .fg(HOTKEY)
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+
+    vec![
+        Span::styled("[", style),
+        Span::styled(button.hotkey.to_string(), hotkey_style),
+        Span::styled(format!(" {}]", button.label), style),
+    ]
+}
+
+fn render_search_box(frame: &mut Frame, area: Rect, app: &App, state: &ResourceListState) {
+    let focused = app.resource_focus == ResourceFocus::Search;
+    let bg = if focused { ACCENT_DARK } else { PANEL };
+    let border = if focused { HOTKEY } else { BORDER };
+    let text = if focused {
+        format!("{}|", state.search_query)
+    } else if state.search_query.is_empty() {
+        "(empty)".to_string()
+    } else {
+        state.search_query.clone()
+    };
+
+    let search_style = Style::default().fg(FG).bg(bg);
+    let search = Paragraph::new(Line::from(vec![
+        Span::styled("Search: ", search_style.add_modifier(Modifier::BOLD)),
+        Span::styled(text, search_style),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Search")
+            .style(search_style)
+            .border_style(Style::default().fg(border).bg(bg)),
+    )
+    .style(search_style);
+
+    frame.render_widget(search, area);
 }
 
 pub fn render_error(frame: &mut Frame, area: Rect, error: &str) {
     let panel = Paragraph::new(error)
-        .block(Block::default().borders(Borders::ALL).title("Errors"))
-        .style(Style::default().fg(Color::Red))
+        .block(block("Errors"))
+        .style(Style::default().fg(ERROR).bg(PANEL))
         .wrap(Wrap { trim: true });
 
     frame.render_widget(panel, area);
@@ -195,11 +319,12 @@ pub fn render_text_view(frame: &mut Frame, area: Rect, view: &TextViewContent) {
         .split(area);
 
     let meta = Paragraph::new(view.subtitle.clone())
-        .block(Block::default().borders(Borders::ALL).title(view.title.clone()))
-        .style(Style::default().fg(Color::Cyan));
+        .block(block(view.title.clone()))
+        .style(Style::default().fg(ACCENT).bg(PANEL));
 
     let body = Paragraph::new(view.body.clone())
-        .block(Block::default().borders(Borders::ALL).title("Content"))
+        .block(block("Content"))
+        .style(panel_style())
         .wrap(Wrap { trim: false });
 
     frame.render_widget(meta, sections[0]);
@@ -218,7 +343,8 @@ pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardVi
         .split(sections[0]);
 
     let prompt = Paragraph::new(view.prompt.clone())
-        .block(Block::default().borders(Borders::ALL).title(view.title.clone()))
+        .block(block(view.title.clone()))
+        .style(panel_style())
         .wrap(Wrap { trim: true });
 
     frame.render_widget(prompt, left[0]);
@@ -226,14 +352,29 @@ pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardVi
     match view.step {
         CreateWizardStep::Image => {
             let items = if view.image_rows.is_empty() {
-                vec![ListItem::new("No images available. Press Tab for manual image input.")]
+                vec![ListItem::new(Line::from(Span::styled(
+                    "No images available. Press Tab for manual image input.",
+                    muted_style(),
+                )))]
             } else {
                 view.image_rows
                     .iter()
                     .enumerate()
                     .map(|(index, row)| {
-                        let marker = if index == view.image_index { ">> " } else { "   " };
-                        ListItem::new(format!("{marker}{row}"))
+                        let selected = index == view.image_index;
+                        let style = if selected {
+                            Style::default()
+                                .fg(FG)
+                                .bg(SELECT_BG)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            panel_style()
+                        };
+                        let marker = if selected { ">> " } else { "   " };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(marker, style),
+                            Span::styled(row.clone(), style),
+                        ]))
                     })
                     .collect::<Vec<_>>()
             };
@@ -243,12 +384,13 @@ pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardVi
                 ImageInputMode::Manual => "Manual Image Input",
             };
 
-            let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+            let list = List::new(items).block(block(title)).style(panel_style());
             frame.render_widget(list, left[1]);
         }
         _ => {
             let input = Paragraph::new(view.input_value.clone())
-                .block(Block::default().borders(Borders::ALL).title("Input"))
+                .block(block("Input"))
+                .style(panel_style())
                 .wrap(Wrap { trim: false });
             frame.render_widget(input, left[1]);
         }
@@ -268,11 +410,13 @@ pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardVi
         },
         view.guidance
     ))
-    .block(Block::default().borders(Borders::ALL).title("Guidance"))
+    .block(block("Guidance"))
+    .style(panel_style())
     .wrap(Wrap { trim: true });
 
     let summary = Paragraph::new(view.summary_lines.join("\n"))
-        .block(Block::default().borders(Borders::ALL).title("Request Summary"))
+        .block(block("Request Summary"))
+        .style(panel_style())
         .wrap(Wrap { trim: true });
 
     frame.render_widget(guidance, right[0]);
@@ -282,16 +426,23 @@ pub fn render_create_wizard(frame: &mut Frame, area: Rect, view: &CreateWizardVi
 pub fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let left = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(20), Constraint::Percentage(35)])
+        .constraints([
+            Constraint::Percentage(45),
+            Constraint::Percentage(20),
+            Constraint::Percentage(35),
+        ])
         .split(area);
 
     let status = Paragraph::new(app.status_message.clone())
-        .block(Block::default().borders(Borders::ALL).title("Status"))
+        .block(block("Status"))
+        .style(panel_style())
         .wrap(Wrap { trim: true });
     let progress = Paragraph::new(app.progress_text())
-        .block(Block::default().borders(Borders::ALL).title("Progress"));
+        .block(block("Progress"))
+        .style(panel_style());
     let summary = Paragraph::new(app.recent_actions_summary())
-        .block(Block::default().borders(Borders::ALL).title("Recent Actions"))
+        .block(block("Recent Actions"))
+        .style(panel_style())
         .wrap(Wrap { trim: true });
 
     frame.render_widget(status, left[0]);
@@ -309,8 +460,8 @@ pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
             ""
         }
     ))
-        .block(Block::default().borders(Borders::ALL).title("Help"))
-        .style(Style::default().fg(Color::Gray));
+    .block(block("Help"))
+    .style(Style::default().fg(MUTED).bg(PANEL));
 
     frame.render_widget(help, area);
 }
@@ -319,10 +470,7 @@ pub fn render_confirm(frame: &mut Frame, confirm: &ConfirmState) {
     let popup = centered_rect(60, 30, frame.area());
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
         .margin(1)
         .split(popup);
 
@@ -331,27 +479,30 @@ pub fn render_confirm(frame: &mut Frame, confirm: &ConfirmState) {
         Block::default()
             .borders(Borders::ALL)
             .title(confirm.title.clone())
-            .style(Style::default().bg(Color::Black)),
+            .style(panel_style())
+            .border_style(Style::default().fg(HOTKEY).bg(PANEL)),
         popup,
     );
 
-    let message = Paragraph::new(confirm.message.clone()).wrap(Wrap { trim: true });
+    let message = Paragraph::new(confirm.message.clone())
+        .style(panel_style())
+        .wrap(Wrap { trim: true });
     frame.render_widget(message, areas[0]);
 
     let confirm_style = if confirm.selected_confirm {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
+            .fg(FG)
+            .bg(ACCENT_DARK)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
+        Style::default().fg(FG).bg(PANEL_ALT)
     };
     let cancel_style = if confirm.selected_confirm {
-        Style::default()
+        Style::default().fg(FG).bg(PANEL_ALT)
     } else {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
+            .fg(FG)
+            .bg(ACCENT_DARK)
             .add_modifier(Modifier::BOLD)
     };
 
@@ -360,12 +511,13 @@ pub fn render_confirm(frame: &mut Frame, confirm: &ConfirmState) {
             format!(" {} ", confirm.cancel_label),
             cancel_style.add_modifier(Modifier::BOLD),
         ),
-        Span::raw("   "),
+        Span::styled("   ", panel_style()),
         Span::styled(
             format!(" {} ", confirm.confirm_label),
             confirm_style.add_modifier(Modifier::BOLD),
         ),
-    ]));
+    ]))
+    .style(panel_style());
 
     frame.render_widget(buttons, areas[1]);
 }
@@ -390,9 +542,21 @@ fn overall_status(app: &App) -> StatusLevel {
     }
 }
 
+fn status_style(status: StatusLevel) -> Style {
+    let fg = match status {
+        StatusLevel::Ok | StatusLevel::Info => OK,
+        StatusLevel::Warning => WARN,
+        StatusLevel::Error => ERROR,
+    };
+
+    Style::default()
+        .fg(fg)
+        .bg(PANEL)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn query_label(app: &App) -> &'static str {
     match app.screen {
-        Screen::MainMenu => "Menu",
         Screen::ResourceList(kind) => match kind {
             crate::app::ResourceKind::Containers => app.docker.resources.containers.label,
             crate::app::ResourceKind::Images => app.docker.resources.images.label,
