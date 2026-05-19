@@ -72,7 +72,23 @@ fn execute_app_command(
     command: AppCommand,
 ) -> Result<()> {
     match command {
-        AppCommand::OpenContainerShell {
+        AppCommand::RunInteractive { args, name } => {
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+
+            let service = DockerService::new(&app.config.docker);
+            let result = service.run_interactive(args);
+
+            enable_raw_mode()?;
+            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+            terminal.hide_cursor()?;
+
+            app.handle_interactive_result(result, &name);
+            terminal.clear()?;
+            terminal.draw(|frame| ui::render(frame, app))?;
+        }
+        AppCommand::OpenShell {
             container_id,
             container_name,
         } => {
@@ -87,7 +103,7 @@ fn execute_app_command(
             execute!(terminal.backend_mut(), EnterAlternateScreen)?;
             terminal.hide_cursor()?;
 
-            app.handle_shell_result(result, &container_name);
+            app.handle_interactive_result(result, &format!("shell: {container_name}"));
             terminal.clear()?;
             terminal.draw(|frame| ui::render(frame, app))?;
         }

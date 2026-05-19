@@ -4,8 +4,8 @@ use crossterm::event::KeyCode;
 
 use crate::config::AppConfig;
 use crate::docker::{
-    ContainerCreateRequest, ContainerSummary, DockerOverview, DockerService, ImageSummary,
-    NetworkSummary, ResourceQuery, StatusLevel, VolumeSummary,
+    ContainerCreateRequest, ContainerSummary, DockerOverview, DockerService, ImageSearchResult,
+    ImageSummary, NetworkSummary, ResourceQuery, StatusLevel, VolumeSummary,
 };
 
 #[derive(Debug)]
@@ -23,6 +23,7 @@ pub struct App {
     pub search_mode: bool,
     pub resource_focus: ResourceFocus,
     pub action_index: usize,
+    pub menu_index: usize,
     pub detail_scroll: u16,
     pub search_query: String,
     pub filter: ResourceFilter,
@@ -30,6 +31,7 @@ pub struct App {
     pub selected_keys: BTreeSet<String>,
     pub recent_actions: Vec<String>,
     pub wizard: CreateWizardState,
+    pub image_search: ImageSearchState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ pub enum Screen {
     ResourceList(ResourceKind),
     TextView(TextViewState),
     CreateWizard,
+    ImageSearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,10 +48,12 @@ pub enum ResourceKind {
     Images,
     Volumes,
     Networks,
+    Hub,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceFocus {
+    Menu,
     List,
     Actions,
     Search,
@@ -65,6 +70,8 @@ pub enum ResourceAction {
     Logs,
     Inspect,
     Shell,
+    SearchRemote,
+    Pull,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,8 +86,6 @@ pub struct ConfirmState {
     pub title: String,
     pub message: String,
     pub confirm_label: String,
-    pub cancel_label: String,
-    pub selected_confirm: bool,
     pub action: ConfirmAction,
 }
 
@@ -147,6 +152,7 @@ pub enum SortMode {
 pub struct TextViewState {
     pub source: ResourceKind,
     pub kind: TextViewKind,
+    pub scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +171,11 @@ pub struct TextViewContent {
 
 #[derive(Debug, Clone)]
 pub enum AppCommand {
-    OpenContainerShell {
+    RunInteractive {
+        args: Vec<String>,
+        name: String,
+    },
+    OpenShell {
         container_id: String,
         container_name: String,
     },
@@ -182,6 +192,21 @@ pub struct CreateWizardState {
     pub volumes_value: String,
     pub env_value: String,
     pub input_buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubFocus {
+    Query,
+    Results,
+    Actions,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageSearchState {
+    pub query: String,
+    pub results: Vec<ImageSearchResult>,
+    pub is_searching: bool,
+    pub focus: HubFocus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,11 +238,30 @@ pub struct CreateWizardView {
     pub summary_lines: Vec<String>,
 }
 
+impl ImageSearchState {
+    pub fn new() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            is_searching: false,
+            focus: HubFocus::Query,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.results.clear();
+        self.is_searching = false;
+        self.focus = HubFocus::Query;
+    }
+}
+
 impl App {
     pub fn new(config: AppConfig) -> Self {
         let docker_service = DockerService::new(&config.docker);
         let docker = docker_service.inspect();
         let wizard = CreateWizardState::new(&docker);
+        let image_search = ImageSearchState::new();
 
         Self {
             config,
@@ -234,6 +278,7 @@ impl App {
             search_mode: false,
             resource_focus: ResourceFocus::List,
             action_index: 0,
+            menu_index: 0,
             detail_scroll: 0,
             search_query: String::new(),
             filter: ResourceFilter::All,
@@ -241,6 +286,7 @@ impl App {
             selected_keys: BTreeSet::new(),
             recent_actions: vec!["Opened dockers.".to_string()],
             wizard,
+            image_search,
         }
     }
 
@@ -257,9 +303,17 @@ impl App {
             return self.handle_confirm_key(key);
         }
 
+        if self.screen == Screen::ImageSearch {
+            return self.handle_image_search_key(key);
+        }
+
         if let Some(kind) = function_key_resource(key) {
             self.open_resource_list(kind);
             return None;
+        }
+
+        if self.resource_focus == ResourceFocus::Menu {
+            return self.handle_menu_key(key);
         }
 
         if self.resource_focus == ResourceFocus::Search {
@@ -339,26 +393,25 @@ impl App {
         }
     }
 
-    pub fn handle_shell_result(&mut self, result: Result<(), String>, container_name: &str) {
+    pub fn handle_interactive_result(&mut self, result: Result<(), String>, name: &str) {
         match result {
             Ok(()) => {
-                self.push_recent_action(format!(
-                    "Returned from shell for container `{container_name}`."
-                ));
-                self.status_message =
-                    format!("Returned from interactive shell for container `{container_name}`.");
+                self.push_recent_action(format!("Returned from interactive `{name}`."));
+                self.status_message = format!("Returned from interactive `{name}`.");
                 self.error_message = None;
                 self.refresh();
             }
             Err(error) => {
                 self.error_message = Some(error);
-                self.status_message =
-                    format!("Failed to open interactive shell for `{container_name}`.");
+                self.status_message = format!("Interactive `{name}` failed.");
                 self.set_resource_focus(ResourceFocus::List);
-                self.screen = Screen::TextView(TextViewState {
-                    source: ResourceKind::Containers,
-                    kind: TextViewKind::ShellHelp,
-                });
+                if name.contains("shell") {
+                    self.screen = Screen::TextView(TextViewState {
+                        source: ResourceKind::Containers,
+                        kind: TextViewKind::ShellHelp,
+                        scroll: 0,
+                    });
+                }
             }
         }
     }
@@ -368,6 +421,7 @@ impl App {
             Screen::ResourceList(kind) => kind,
             Screen::TextView(state) => state.source,
             Screen::CreateWizard => ResourceKind::Containers,
+            Screen::ImageSearch => ResourceKind::Hub,
         }
     }
 
@@ -387,6 +441,15 @@ impl App {
                 ResourceActionButton::new(ResourceAction::Inspect, "Inspect", 'i'),
                 ResourceActionButton::new(ResourceAction::Remove, "Delete", 'd'),
             ],
+            ResourceKind::Hub => {
+                let mut actions = vec![
+                    ResourceActionButton::new(ResourceAction::SearchRemote, "Search Hub", 's'),
+                ];
+                if !self.image_search.results.is_empty() {
+                    actions.push(ResourceActionButton::new(ResourceAction::Pull, "Pull Image", 'p'));
+                }
+                actions
+            }
             ResourceKind::Volumes => vec![
                 ResourceActionButton::new(ResourceAction::Inspect, "Inspect", 'i'),
                 ResourceActionButton::new(ResourceAction::Remove, "Delete", 'd'),
@@ -444,6 +507,13 @@ impl App {
                     self.build_network_rows(query),
                 )
             }
+            ResourceKind::Hub => (
+                "Hub".to_string(),
+                "Search and pull images from Docker Hub".to_string(),
+                "Docker Hub Integration".to_string(),
+                StatusLevel::Ok,
+                Vec::new(),
+            ),
         };
 
         let total_count = base_rows.len();
@@ -563,6 +633,11 @@ impl App {
                     }
                 }
             }
+            (ResourceKind::Hub, _) => TextViewContent {
+                title: "Hub".to_string(),
+                subtitle: "Hub integration".to_string(),
+                body: "Search and pull images from Docker Hub using the actions.".to_string(),
+            },
             (ResourceKind::Containers, TextViewKind::Logs) => {
                 if let Some(container) = self.selected_container() {
                     let service = DockerService::new(&self.config.docker);
@@ -616,6 +691,12 @@ impl App {
                     .map(|row| row.preview.clone())
                     .unwrap_or_else(|| "No rows available".to_string())
             }
+            Screen::ImageSearch => self
+                .image_search
+                .results
+                .get(self.list_index)
+                .map(|res| res.preview())
+                .unwrap_or_else(|| "No results available".to_string()),
             Screen::TextView(state) => self.text_view_content(state).subtitle,
             Screen::CreateWizard => self.wizard_view().guidance,
         }
@@ -668,6 +749,7 @@ impl App {
             Screen::CreateWizard => {
                 "Wizard: type input  Enter next  Tab image mode  Up/Down image select  Backspace edit  Esc cancel"
             }
+            Screen::ImageSearch => "Search: type query  Enter search/pull  Esc back  / reset query",
         }
     }
 
@@ -677,6 +759,8 @@ impl App {
 
         if self.is_loading {
             format!("{glyph} loading docker data...")
+        } else if self.image_search.is_searching {
+            format!("{glyph} searching hub...")
         } else if self.search_mode {
             format!("{glyph} search: {}", self.search_query)
         } else if self.screen == Screen::CreateWizard {
@@ -743,6 +827,7 @@ impl App {
                     ResourceKind::Networks => {
                         self.open_resource_confirm(ConfirmAction::RemoveNetwork)
                     }
+                    ResourceKind::Hub => {}
                 }
                 None
             }
@@ -759,6 +844,17 @@ impl App {
             ResourceAction::Shell => {
                 if kind == ResourceKind::Containers {
                     self.open_shell()
+                } else {
+                    None
+                }
+            }
+            ResourceAction::SearchRemote => {
+                self.open_image_search();
+                None
+            }
+            ResourceAction::Pull => {
+                if kind == ResourceKind::Images {
+                    self.pull_selected_image()
                 } else {
                     None
                 }
@@ -811,6 +907,14 @@ impl App {
                 }
                 _ => None,
             },
+            Screen::ResourceList(ResourceKind::Hub) => match key {
+                KeyCode::Char('s') => {
+                    self.open_image_search();
+                    None
+                }
+                KeyCode::Char('p') => self.pull_selected_image(),
+                _ => None,
+            },
             Screen::ResourceList(ResourceKind::Volumes) => match key {
                 KeyCode::Char('d') => {
                     self.open_resource_confirm(ConfirmAction::RemoveVolume);
@@ -833,33 +937,169 @@ impl App {
                 }
                 _ => None,
             },
-            Screen::TextView(_) | Screen::CreateWizard => None,
+            Screen::ImageSearch | Screen::TextView(_) | Screen::CreateWizard => None,
+        }
+    }
+
+    fn handle_menu_key(&mut self, key: KeyCode) -> Option<AppCommand> {
+        match key {
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.menu_index > 0 {
+                    self.menu_index -= 1;
+                } else {
+                    self.menu_index = 4;
+                }
+                None
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.menu_index < 4 {
+                    self.menu_index += 1;
+                } else {
+                    self.menu_index = 0;
+                }
+                None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let kind = match self.menu_index {
+                    0 => ResourceKind::Containers,
+                    1 => ResourceKind::Images,
+                    2 => ResourceKind::Volumes,
+                    3 => ResourceKind::Networks,
+                    _ => ResourceKind::Hub,
+                };
+                self.open_resource_list(kind);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.set_resource_focus(ResourceFocus::List);
+                self.status_message = "Returned to resource list.".to_string();
+                None
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.open_quit_confirm();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_image_search_key(&mut self, key: KeyCode) -> Option<AppCommand> {
+        if self.image_search.is_searching {
+            return None;
+        }
+
+        match self.image_search.focus {
+            HubFocus::Query => match key {
+                KeyCode::Esc => {
+                    self.screen = Screen::ResourceList(ResourceKind::Hub);
+                    self.set_resource_focus(ResourceFocus::Menu);
+                    self.status_message = "Main menu focused.".to_string();
+                    None
+                }
+                KeyCode::Backspace => {
+                    self.image_search.query.pop();
+                    None
+                }
+                KeyCode::Enter => {
+                    if !self.image_search.query.is_empty() {
+                        self.execute_image_search();
+                        if !self.image_search.results.is_empty() {
+                            self.image_search.focus = HubFocus::Results;
+                        }
+                    }
+                    None
+                }
+                KeyCode::Char(c) => {
+                    self.image_search.query.push(c);
+                    None
+                }
+                _ => None,
+            },
+            HubFocus::Results => match key {
+                KeyCode::Esc => {
+                    self.image_search.focus = HubFocus::Query;
+                    self.status_message = "Search box focused.".to_string();
+                    None
+                }
+                KeyCode::Right | KeyCode::Tab => {
+                    self.image_search.focus = HubFocus::Actions;
+                    self.action_index = 0;
+                    self.status_message = "Actions focused. Use Left/Right and Space/Enter.".to_string();
+                    None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.list_index > 0 {
+                        self.list_index -= 1;
+                    }
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let max = self.image_search.results.len().saturating_sub(1);
+                    if self.list_index < max {
+                        self.list_index += 1;
+                    }
+                    None
+                }
+                KeyCode::Enter => self.pull_searched_image(),
+                KeyCode::Char('/') => {
+                    self.image_search.focus = HubFocus::Query;
+                    self.image_search.results.clear();
+                    self.image_search.query.clear();
+                    self.status_message = "Enter new search query.".to_string();
+                    None
+                }
+                _ => None,
+            },
+            HubFocus::Actions => match key {
+                KeyCode::Esc | KeyCode::Left => {
+                    self.image_search.focus = HubFocus::Results;
+                    self.status_message = "Search results focused.".to_string();
+                    None
+                }
+                KeyCode::Right | KeyCode::Tab => {
+                    let actions = self.resource_actions(ResourceKind::Hub);
+                    if self.action_index + 1 < actions.len() {
+                        self.action_index += 1;
+                    } else {
+                        self.action_index = 0;
+                    }
+                    None
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let actions = self.resource_actions(ResourceKind::Hub);
+                    if let Some(button) = actions.get(self.action_index) {
+                        match button.action {
+                            ResourceAction::SearchRemote => {
+                                self.image_search.focus = HubFocus::Query;
+                                self.status_message = "Search box focused.".to_string();
+                                None
+                            }
+                            ResourceAction::Pull => self.pull_searched_image(),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
         }
     }
 
     fn handle_confirm_key(&mut self, key: KeyCode) -> Option<AppCommand> {
-        let Some(confirm) = self.confirm.as_mut() else {
+        let Some(confirm) = self.confirm.as_ref() else {
             return None;
         };
 
         match key {
-            KeyCode::Left | KeyCode::Char('h') => confirm.selected_confirm = false,
-            KeyCode::Right | KeyCode::Char('l') => confirm.selected_confirm = true,
-            KeyCode::Tab => confirm.selected_confirm = !confirm.selected_confirm,
             KeyCode::Esc => {
                 self.confirm = None;
                 self.status_message = "Cancelled.".to_string();
             }
             KeyCode::Enter => {
-                let accepted = confirm.selected_confirm;
                 let action = confirm.action;
                 self.confirm = None;
-
-                if accepted {
-                    return self.execute_confirm_action(action);
-                }
-
-                self.status_message = "Cancelled.".to_string();
+                return self.execute_confirm_action(action);
             }
             _ => {}
         }
@@ -944,7 +1184,10 @@ impl App {
                     self.set_resource_focus(ResourceFocus::List);
                     self.status_message = "Resource list focused.".to_string();
                 }
-                ResourceFocus::List => self.go_back(),
+                ResourceFocus::List | ResourceFocus::Menu => {
+                    self.set_resource_focus(ResourceFocus::Menu);
+                    self.status_message = "Main menu navigation mode. Arrows to select, Enter to open.".to_string();
+                }
             },
             Screen::TextView(_) => self.go_back(),
             Screen::CreateWizard => {
@@ -953,12 +1196,14 @@ impl App {
                 self.set_resource_focus(ResourceFocus::List);
                 self.status_message = "Container creation wizard cancelled.".to_string();
             }
+            Screen::ImageSearch => self.go_back(),
         }
     }
 
     fn move_up(&mut self) {
         match self.screen {
             Screen::ResourceList(_) => match self.resource_focus {
+                ResourceFocus::Menu => {}
                 ResourceFocus::List => {
                     if self.list_index > 0 {
                         self.list_index -= 1;
@@ -977,15 +1222,33 @@ impl App {
                         self.detail_scroll = self.detail_scroll.saturating_sub(1);
                     }
                 }
-                ResourceFocus::Actions => {}
+                ResourceFocus::Actions => {
+                    self.set_resource_focus(ResourceFocus::Menu);
+                    self.status_message = "Main menu focused.".to_string();
+                }
             },
-            Screen::TextView(_) | Screen::CreateWizard => {}
+            Screen::ImageSearch => {
+                if self.list_index > 0 {
+                    self.list_index -= 1;
+                }
+            }
+            Screen::TextView(mut state) => {
+                if state.scroll > 0 {
+                    state.scroll -= 1;
+                    self.screen = Screen::TextView(state);
+                }
+            }
+            Screen::CreateWizard => {}
         }
     }
 
     fn move_down(&mut self) {
         match self.screen {
             Screen::ResourceList(kind) => match self.resource_focus {
+                ResourceFocus::Menu => {
+                    self.set_resource_focus(ResourceFocus::List);
+                    self.status_message = "Resource list focused.".to_string();
+                }
                 ResourceFocus::List => {
                     let max = self.resource_list_state(kind).rows.len().saturating_sub(1);
                     if self.list_index < max {
@@ -1002,13 +1265,30 @@ impl App {
                 }
                 ResourceFocus::Search => {}
             },
-            Screen::TextView(_) | Screen::CreateWizard => {}
+            Screen::ImageSearch => {
+                let max = self.image_search.results.len().saturating_sub(1);
+                if self.list_index < max {
+                    self.list_index += 1;
+                }
+            }
+            Screen::TextView(mut state) => {
+                state.scroll += 1;
+                self.screen = Screen::TextView(state);
+            }
+            Screen::CreateWizard => {}
         }
     }
 
     fn move_right(&mut self) {
         match self.screen {
             Screen::ResourceList(kind) => match self.resource_focus {
+                ResourceFocus::Menu => {
+                    if self.menu_index < 4 {
+                        self.menu_index += 1;
+                    } else {
+                        self.menu_index = 0;
+                    }
+                }
                 ResourceFocus::List => {
                     self.set_resource_focus(ResourceFocus::Actions);
                     self.clamp_action_index(kind);
@@ -1023,6 +1303,7 @@ impl App {
                 }
                 ResourceFocus::Search | ResourceFocus::Details => {}
             },
+            Screen::ImageSearch => {}
             Screen::TextView(_) | Screen::CreateWizard => {}
         }
     }
@@ -1030,6 +1311,13 @@ impl App {
     fn move_left(&mut self) {
         match self.screen {
             Screen::ResourceList(kind) => match self.resource_focus {
+                ResourceFocus::Menu => {
+                    if self.menu_index > 0 {
+                        self.menu_index -= 1;
+                    } else {
+                        self.menu_index = 4;
+                    }
+                }
                 ResourceFocus::Actions => {
                     if self.action_index == 0 {
                         self.set_resource_focus(ResourceFocus::List);
@@ -1039,9 +1327,13 @@ impl App {
                     }
                     self.clamp_action_index(kind);
                 }
-                ResourceFocus::List => self.go_back(),
+                ResourceFocus::List => {
+                    self.set_resource_focus(ResourceFocus::Menu);
+                    self.status_message = "Main menu focused.".to_string();
+                }
                 ResourceFocus::Search | ResourceFocus::Details => {}
             },
+            Screen::ImageSearch => self.go_back(),
             Screen::TextView(_) => self.go_back(),
             Screen::CreateWizard => self.go_back(),
         }
@@ -1092,27 +1384,33 @@ impl App {
     }
 
     fn page_detail_up(&mut self) {
-        if !matches!(
-            self.screen,
-            Screen::ResourceList(_) if self.resource_focus == ResourceFocus::Details
-        ) {
-            return;
-        }
-
-        if self.detail_scroll == 0 {
-            self.set_resource_focus(ResourceFocus::Search);
-            self.status_message = "Search box focused.".to_string();
-        } else {
-            self.detail_scroll = self.detail_scroll.saturating_sub(6);
+        match self.screen {
+            Screen::ResourceList(_) if self.resource_focus == ResourceFocus::Details => {
+                if self.detail_scroll == 0 {
+                    self.set_resource_focus(ResourceFocus::Search);
+                    self.status_message = "Search box focused.".to_string();
+                } else {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(6);
+                }
+            }
+            Screen::TextView(mut state) => {
+                state.scroll = state.scroll.saturating_sub(10);
+                self.screen = Screen::TextView(state);
+            }
+            _ => {}
         }
     }
 
     fn page_detail_down(&mut self) {
-        if matches!(
-            self.screen,
-            Screen::ResourceList(_) if self.resource_focus == ResourceFocus::Details
-        ) {
-            self.scroll_detail_down(6);
+        match self.screen {
+            Screen::ResourceList(_) if self.resource_focus == ResourceFocus::Details => {
+                self.scroll_detail_down(6);
+            }
+            Screen::TextView(mut state) => {
+                state.scroll = state.scroll.saturating_add(10);
+                self.screen = Screen::TextView(state);
+            }
+            _ => {}
         }
     }
 
@@ -1137,6 +1435,16 @@ impl App {
                 self.open_text_view_for(kind, TextViewKind::Inspect);
                 None
             }
+            Screen::ImageSearch => {
+                if !self.image_search.results.is_empty() {
+                    self.pull_searched_image()
+                } else if !self.image_search.query.is_empty() {
+                    self.execute_image_search();
+                    None
+                } else {
+                    None
+                }
+            }
             Screen::TextView(_) | Screen::CreateWizard => None,
         }
     }
@@ -1157,6 +1465,12 @@ impl App {
                 self.detail_scroll = 0;
                 self.set_resource_focus(ResourceFocus::List);
                 self.status_message = "Returned to container list.".to_string();
+            }
+            Screen::ImageSearch => {
+                self.screen = Screen::ResourceList(ResourceKind::Images);
+                self.detail_scroll = 0;
+                self.set_resource_focus(ResourceFocus::List);
+                self.status_message = "Returned to image list.".to_string();
             }
         }
     }
@@ -1258,19 +1572,25 @@ impl App {
             _ => None,
         }
     }
-
-    fn set_resource_focus(&mut self, focus: ResourceFocus) {
+    pub fn set_resource_focus(&mut self, focus: ResourceFocus) {
         self.resource_focus = focus;
+        if focus == ResourceFocus::Menu {
+            self.menu_index = match self.active_resource_kind() {
+                ResourceKind::Containers => 0,
+                ResourceKind::Images => 1,
+                ResourceKind::Volumes => 2,
+                ResourceKind::Networks => 3,
+                ResourceKind::Hub => 4,
+            };
+        }
         self.search_mode = focus == ResourceFocus::Search;
     }
 
     fn open_quit_confirm(&mut self) {
         self.confirm = Some(ConfirmState {
             title: "Quit dockers?".to_string(),
-            message: "Close the application and leave the current terminal view?".to_string(),
+            message: "Press Enter to quit, Esc to cancel.".to_string(),
             confirm_label: "Quit".to_string(),
-            cancel_label: "Stay".to_string(),
-            selected_confirm: false,
             action: ConfirmAction::Quit,
         });
     }
@@ -1285,7 +1605,7 @@ impl App {
             ConfirmAction::StopContainer => (
                 "Stop container?",
                 format!(
-                    "Stop container `{}` ({})? Running processes inside the container will be interrupted.",
+                    "Stop container `{}` ({})? Press Enter to stop, Esc to cancel.",
                     container.names, container.id
                 ),
                 "Stop".to_string(),
@@ -1293,7 +1613,7 @@ impl App {
             ConfirmAction::RestartContainer => (
                 "Restart container?",
                 format!(
-                    "Restart container `{}` ({})? Connected sessions may be interrupted.",
+                    "Restart container `{}` ({})? Press Enter to restart, Esc to cancel.",
                     container.names, container.id
                 ),
                 "Restart".to_string(),
@@ -1301,7 +1621,7 @@ impl App {
             ConfirmAction::RemoveContainer => (
                 "Delete container?",
                 format!(
-                    "Remove container `{}` ({}) with `docker rm -f`? This is destructive.",
+                    "Remove container `{}` ({})? Press Enter to delete, Esc to cancel.",
                     container.names, container.id
                 ),
                 "Delete".to_string(),
@@ -1313,8 +1633,6 @@ impl App {
             title: title.to_string(),
             message,
             confirm_label,
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false,
             action,
         });
     }
@@ -1325,7 +1643,11 @@ impl App {
 
     fn open_text_view_for(&mut self, source: ResourceKind, kind: TextViewKind) {
         self.set_resource_focus(ResourceFocus::List);
-        self.screen = Screen::TextView(TextViewState { source, kind });
+        self.screen = Screen::TextView(TextViewState {
+            source,
+            kind,
+            scroll: 0,
+        });
         self.status_message = match kind {
             TextViewKind::Inspect => format!("Opened {} details.", source.label()),
             TextViewKind::Logs => "Opened container logs.".to_string(),
@@ -1345,7 +1667,7 @@ impl App {
                 (
                     "Delete image?",
                     format!(
-                        "Remove image `{}:{}` ({})? This may fail if containers still reference it.",
+                        "Remove image `{}:{}` ({})? Press Enter to delete, Esc to cancel.",
                         image.repository, image.tag, image.id
                     ),
                     "Delete".to_string(),
@@ -1359,7 +1681,7 @@ impl App {
                 (
                     "Delete volume?",
                     format!(
-                        "Remove volume `{}`? This is destructive if data is still needed.",
+                        "Remove volume `{}`? Press Enter to delete, Esc to cancel.",
                         volume.name
                     ),
                     "Delete".to_string(),
@@ -1373,7 +1695,7 @@ impl App {
                 (
                     "Delete network?",
                     format!(
-                        "Remove network `{}` ({})? Connected containers may be affected.",
+                        "Remove network `{}` ({})? Press Enter to delete, Esc to cancel.",
                         network.name, network.id
                     ),
                     "Delete".to_string(),
@@ -1386,10 +1708,76 @@ impl App {
             title: title.to_string(),
             message,
             confirm_label,
-            cancel_label: "Cancel".to_string(),
-            selected_confirm: false,
             action,
         });
+    }
+
+    fn open_image_search(&mut self) {
+        self.image_search.reset();
+        self.screen = Screen::ImageSearch;
+        self.list_index = 0;
+        self.status_message = "Image search mode. Type query and press Enter.".to_string();
+    }
+
+    fn execute_image_search(&mut self) {
+        let query = self.image_search.query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+
+        self.image_search.is_searching = true;
+        self.status_message = format!("Searching for `{query}`...");
+
+        let service = DockerService::new(&self.config.docker);
+        match service.search_images(&query) {
+            Ok(results) => {
+                self.image_search.results = results;
+                if self.image_search.results.is_empty() {
+                    self.status_message = format!("No results for `{query}`.");
+                } else {
+                    self.status_message =
+                        format!("Found {} results for `{query}`.", self.image_search.results.len());
+                }
+            }
+            Err(error) => {
+                self.error_message = Some(error);
+                self.status_message = "Search failed.".to_string();
+            }
+        }
+        self.image_search.is_searching = false;
+        self.list_index = 0;
+    }
+
+    fn pull_selected_image(&mut self) -> Option<AppCommand> {
+        let Some(image) = self.selected_image() else {
+            self.error_message = Some("No image selected.".to_string());
+            return None;
+        };
+
+        let image_name = if image.repository == "<none>" {
+            image.id.clone()
+        } else if image.tag == "<none>" {
+            image.repository.clone()
+        } else {
+            format!("{}:{}", image.repository, image.tag)
+        };
+
+        Some(AppCommand::RunInteractive {
+            args: vec!["pull".to_string(), image_name.clone()],
+            name: format!("docker pull {image_name}"),
+        })
+    }
+
+    fn pull_searched_image(&mut self) -> Option<AppCommand> {
+        let Some(result) = self.image_search.results.get(self.list_index) else {
+            return None;
+        };
+
+        let image_name = result.name.clone();
+        Some(AppCommand::RunInteractive {
+            args: vec!["pull".to_string(), image_name.clone()],
+            name: format!("docker pull {image_name}"),
+        })
     }
 
     fn open_shell(&mut self) -> Option<AppCommand> {
@@ -1408,7 +1796,7 @@ impl App {
         self.push_recent_action(self.status_message.clone());
         self.error_message = None;
 
-        Some(AppCommand::OpenContainerShell {
+        Some(AppCommand::OpenShell {
             container_id,
             container_name,
         })
@@ -1951,6 +2339,7 @@ impl ResourceKind {
             ResourceKind::Images => "image",
             ResourceKind::Volumes => "volume",
             ResourceKind::Networks => "network",
+            ResourceKind::Hub => "hub",
         }
     }
 
@@ -1960,6 +2349,7 @@ impl ResourceKind {
             ResourceKind::Images => "Images",
             ResourceKind::Volumes => "Volumes",
             ResourceKind::Networks => "Networks",
+            ResourceKind::Hub => "Hub",
         }
     }
 }
@@ -2219,6 +2609,7 @@ fn function_key_resource(key: KeyCode) -> Option<ResourceKind> {
         KeyCode::F(2) => Some(ResourceKind::Images),
         KeyCode::F(3) => Some(ResourceKind::Volumes),
         KeyCode::F(4) => Some(ResourceKind::Networks),
+        KeyCode::F(5) => Some(ResourceKind::Hub),
         _ => None,
     }
 }

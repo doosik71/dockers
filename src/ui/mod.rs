@@ -16,12 +16,16 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     match app.screen {
         Screen::ResourceList(kind) => render_resource_list(frame, areas.content, app, kind),
-        Screen::TextView(state) => {
-            widgets::render_text_view(frame, areas.content, &app.text_view_content(state))
-        }
+        Screen::TextView(state) => widgets::render_text_view(
+            frame,
+            areas.content,
+            &app.text_view_content(state),
+            state.scroll,
+        ),
         Screen::CreateWizard => {
             widgets::render_create_wizard(frame, areas.content, &app.wizard_view())
         }
+        Screen::ImageSearch => widgets::render_image_search(frame, areas.content, app),
     }
 
     if let Some(error) = &app.error_message {

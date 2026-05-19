@@ -87,6 +87,18 @@ pub struct ImageSummary {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ImageSearchResult {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Description")]
+    pub description: String,
+    #[serde(rename = "StarCount")]
+    pub stars: String,
+    #[serde(rename = "IsOfficial")]
+    pub official: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct VolumeSummary {
     #[serde(rename = "Name")]
     pub name: String,
@@ -191,6 +203,30 @@ impl DockerService {
         self.runner
             .run(["image", "inspect", image_id])
             .map(|output| output.stdout)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn search_images(&self, query: &str) -> Result<Vec<ImageSearchResult>, String> {
+        match self
+            .runner
+            .run_captured(["search", "--format", "{{json .}}", query])
+        {
+            Ok(output) if output.status_code == Some(0) => {
+                parse_json_lines::<ImageSearchResult>(&output.stdout)
+                    .map_err(|error| format!("failed to parse search results: {error}"))
+            }
+            Ok(output) => Err(format_command_failure(&output, "failed to search images")),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn run_interactive<I, S>(&self, args: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.runner
+            .run_interactive(args)
             .map_err(|error| error.to_string())
     }
 
@@ -593,6 +629,20 @@ impl ImageSummary {
         format!(
             "{}:{} ({}) size={} created={}",
             self.repository, self.tag, self.id, self.size, self.created_since
+        )
+    }
+}
+
+impl ImageSearchResult {
+    pub fn preview(&self) -> String {
+        let official = if self.official == "true" {
+            " [Official]"
+        } else {
+            ""
+        };
+        format!(
+            "{} stars={}{}\n\n{}",
+            self.name, self.stars, official, self.description
         )
     }
 }
